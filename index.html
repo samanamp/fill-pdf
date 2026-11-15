@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; font-src 'self' data: blob:; worker-src 'self' blob:; connect-src 'self' blob: data:; base-uri 'none'; form-action 'none'">
+<meta name="referrer" content="no-referrer">
+<meta name="color-scheme" content="light dark">
+<title>Fill PDF – private PDF form filler</title>
+<meta name="description" content="Fill in any PDF form in your browser: type text, tick boxes and save. Your files never leave your device.">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<header class="top">
+  <div class="brand">
+    <svg viewBox="0 0 32 32" width="26" height="26" aria-hidden="true"><rect x="3" y="2" width="22" height="28" rx="4" class="logo-bg"/><path d="M8 17l4 4 8-9" class="logo-tick"/></svg>
+    <span>Fill PDF</span>
+  </div>
+  <div class="filename" id="fileName" title="">No file open</div>
+  <div class="actions">
+    <button id="openBtn" class="btn">Open PDF</button>
+    <input id="file" type="file" accept="application/pdf,.pdf" hidden>
+    <details class="menu" id="moreMenu">
+      <summary class="btn icon-only" aria-label="More">⋯</summary>
+      <div class="menu-pop">
+        <button id="saveWork" disabled>Save progress to a file</button>
+        <button id="loadWorkBtn" disabled>Load progress from a file</button>
+        <input id="loadWork" type="file" accept=".json,application/json" hidden>
+        <hr>
+        <button id="shortcutsBtn">Keyboard shortcuts</button>
+      </div>
+    </details>
+    <button id="save" class="btn primary" disabled>Save PDF</button>
+  </div>
+</header>
+
+<div class="work">
+  <aside id="thumbs" aria-label="Pages"></aside>
+
+  <main id="stage" tabindex="-1">
+    <section id="empty">
+      <div class="drop-card" id="dropCard">
+        <svg viewBox="0 0 48 48" width="56" height="56" aria-hidden="true"><path d="M12 4h17l9 9v29a2 2 0 0 1-2 2H12a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2z" class="drop-doc"/><path d="M29 4v9h9" class="drop-fold"/><path d="M17 28l5 5 9-11" class="drop-tick"/></svg>
+        <h1>Fill in a PDF form</h1>
+        <p>Drop a PDF here, or</p>
+        <button id="openBtn2" class="btn primary big">Choose a PDF</button>
+        <ul class="points">
+          <li><b>Private.</b> The file stays in your browser and is never uploaded.</li>
+          <li><b>Simple.</b> Click to type, tick or cross. Save when you are done.</li>
+          <li><b>Plain PDFs only.</b> Dynamic “XFA” forms (some government forms) can't be shown here. Use their printable version.</li>
+        </ul>
+      </div>
+    </section>
+
+    <div id="pages" aria-live="off"></div>
+
+    <div class="toolbar" id="toolbar" hidden role="toolbar" aria-label="Tools">
+      <div class="seg" id="tools">
+        <button data-tool="text" class="on" title="Text (T)" aria-label="Text tool">
+          <svg viewBox="0 0 20 20"><path d="M4 5V3.5h12V5M10 3.5v13M7.5 16.5h5"/></svg><span>Text</span></button>
+        <button data-tool="check" title="Tick (C)" aria-label="Tick tool">
+          <svg viewBox="0 0 20 20"><path d="M4 10.5l4 4 8-9"/></svg><span>Tick</span></button>
+        <button data-tool="cross" title="Cross (X)" aria-label="Cross tool">
+          <svg viewBox="0 0 20 20"><path d="M5 5l10 10M15 5L5 15"/></svg><span>Cross</span></button>
+        <button data-tool="select" title="Select and move (V)" aria-label="Select tool">
+          <svg viewBox="0 0 20 20"><path d="M5 3l10 6.5-4.3 1.2L9 15z"/></svg><span>Move</span></button>
+      </div>
+      <i class="div"></i>
+      <div class="group" title="Size">
+        <button id="sizeDown" class="sq" aria-label="Smaller">−</button>
+        <output id="sizeOut">10</output>
+        <button id="sizeUp" class="sq" aria-label="Larger">+</button>
+      </div>
+      <div class="group">
+        <button id="boldBtn" class="sq bold" aria-pressed="false" title="Bold text (Ctrl+B)" aria-label="Bold">B</button>
+      </div>
+      <div class="group swatches" role="radiogroup" aria-label="Ink colour">
+        <button class="sw on" data-color="black" role="radio" aria-checked="true" title="Black ink"><i></i></button>
+        <button class="sw" data-color="blue" role="radio" aria-checked="false" title="Blue ink"><i></i></button>
+      </div>
+      <i class="div"></i>
+      <div class="group">
+        <button id="undo" class="sq" disabled title="Undo (Ctrl+Z)" aria-label="Undo">↶</button>
+        <button id="del" class="sq" disabled title="Delete (Del)" aria-label="Delete selected">🗑</button>
+      </div>
+      <i class="div zoomdiv"></i>
+      <div class="group zoomgrp">
+        <button id="zoomOut" class="sq" aria-label="Zoom out">−</button>
+        <button id="zoomFit" class="zoom" title="Fit to width">100%</button>
+        <button id="zoomIn" class="sq" aria-label="Zoom in">+</button>
+      </div>
+    </div>
+  </main>
+</div>
+
+<footer class="status">
+  <span id="hint">Open a PDF to begin.</span>
+  <span id="pageinfo"></span>
+  <span class="priv">🔒 Runs in your browser. Files are never uploaded. Not affiliated with any government agency.</span>
+</footer>
+
+<div id="toast" role="status" aria-live="polite"></div>
+<div id="dropVeil" hidden>Drop the PDF to open it</div>
+
+<dialog id="shortcuts">
+  <h2>Keyboard shortcuts</h2>
+  <dl>
+    <dt>T / C / X / V</dt><dd>Text, tick, cross, move tool</dd>
+    <dt>Enter</dt><dd>Finish typing (Shift+Enter = new line)</dd>
+    <dt>Double-click</dt><dd>Edit existing text</dd>
+    <dt>Arrow keys</dt><dd>Nudge the selected item (Shift = bigger steps)</dd>
+    <dt>Delete</dt><dd>Delete the selected item</dd>
+    <dt>Ctrl + B</dt><dd>Bold on / off for text</dd>
+    <dt>Ctrl + Z</dt><dd>Undo</dd>
+    <dt>Ctrl + S</dt><dd>Save the PDF</dd>
+  </dl>
+  <form method="dialog"><button class="btn primary">Close</button></form>
+</dialog>
+
+<script src="lib/pdf.min.js"></script>
+<script src="lib/pdf-lib.min.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

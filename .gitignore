@@ -1,0 +1,6 @@
+dist/
+node_modules/
+.wrangler/
+*.progress.json
+*-filled.pdf
+.DS_Store
