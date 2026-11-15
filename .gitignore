@@ -4,3 +4,4 @@ node_modules/
 *.progress.json
 *-filled.pdf
 .DS_Store
+*.pdf

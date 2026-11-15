@@ -22,9 +22,12 @@
   <div class="actions">
     <button id="openBtn" class="btn">Open PDF</button>
     <input id="file" type="file" accept="application/pdf,.pdf" hidden>
+    <input id="addFile" type="file" accept="application/pdf,.pdf" multiple hidden>
     <details class="menu" id="moreMenu">
       <summary class="btn icon-only" aria-label="More">⋯</summary>
       <div class="menu-pop">
+        <button id="addBtn2" disabled>Add pages from another PDF…</button>
+        <hr>
         <button id="saveWork" disabled>Save progress to a file</button>
         <button id="loadWorkBtn" disabled>Load progress from a file</button>
         <input id="loadWork" type="file" accept=".json,application/json" hidden>
@@ -37,7 +40,11 @@
 </header>
 
 <div class="work">
-  <aside id="thumbs" aria-label="Pages"></aside>
+  <aside id="thumbs" aria-label="Pages">
+    <div class="thumbs-head"><button id="addBtn" class="btn small" type="button" title="Add pages from another PDF">＋ Add PDF</button></div>
+    <div id="thumbList"></div>
+    <p class="thumbs-tip">Drag pages to reorder. Drop PDF files here to insert them.</p>
+  </aside>
 
   <main id="stage" tabindex="-1">
     <section id="empty">
@@ -114,11 +121,22 @@
     <dt>Double-click</dt><dd>Edit existing text</dd>
     <dt>Arrow keys</dt><dd>Nudge the selected item (Shift = bigger steps)</dd>
     <dt>Delete</dt><dd>Delete the selected item</dd>
+    <dt>Alt + ↑ / ↓</dt><dd>Move the focused page in the page list</dd>
     <dt>Ctrl + B</dt><dd>Bold on / off for text</dd>
     <dt>Ctrl + Z</dt><dd>Undo</dd>
     <dt>Ctrl + S</dt><dd>Save the PDF</dd>
   </dl>
   <form method="dialog"><button class="btn primary">Close</button></form>
+</dialog>
+
+<dialog id="dropDialog">
+  <h2>Add to this document?</h2>
+  <p id="dropMsg" class="note"></p>
+  <div class="dlg-actions">
+    <button id="dropCancel" class="btn" type="button">Cancel</button>
+    <button id="dropReplace" class="btn" type="button">Open instead</button>
+    <button id="dropAdd" class="btn primary" type="button">Add to the end</button>
+  </div>
 </dialog>
 
 <dialog id="signDialog">

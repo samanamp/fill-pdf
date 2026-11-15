@@ -8,14 +8,14 @@
   const COLORS = { black: [0, 0, 0], blue: [0.05, 0.2, 0.65] };
   const CSS_COLOR = { black: '#000', blue: '#0d33a6' };
   const ZOOMS = [0.5, 0.75, 1, 1.25, 1.5, 2, 3];
-  const MAX_BYTES = 150 * 1024 * 1024;
+  const MAX_BYTES = 150 * 1024 * 1024, MAX_TOTAL = 300 * 1024 * 1024, MAX_PAGES = 500;
   const MIN_SIZE = 5, MAX_SIZE = 48;
   const SIG_FONTS = ['Great Vibes', 'Allura', 'Dancing Script', 'Sacramento', 'Mrs Saint Delafield', 'Homemade Apple'];
   const SIG_MIN = 8, SIG_MAX = 100, SIG_K = 4;       // SIG_K = render scale for crisp signatures
 
   /* ---------- state ---------- */
-  let pdfDoc = null, pdfBytes = null, fileName = 'form.pdf';
-  let pages = [];                 // {n, el, canvas, layer, ghost, w, h, rot, page, task, rendered}
+  let sources = [], nextSrc = 1, fileName = 'form.pdf';   // sources: {id, name, bytes, doc}
+  let pages = [];                 // {n, el, canvas, layer, ghost, w, h, rot, page, src, idx, task, rendered}
   let items = [];                 // {id, page, type, x, y, size, color, text}
   let tool = 'text', color = 'black', size = 10, bold = false;
   let sig = null, signSize = 28, lastName = '';   // sig = {text, font} chosen in the dialog
@@ -24,7 +24,9 @@
   let selected = null, nextId = 1, history = [], dirty = false, curPage = 1;
   let loadToken = 0;
 
-  const stage = $('stage'), pagesEl = $('pages');
+  const stage = $('stage'), pagesEl = $('pages'), thumbList = $('thumbList');
+  const hasDoc = () => pages.length > 0;
+  const isPdf = f => /\.pdf$/i.test(f.name) || f.type === 'application/pdf';
 
   /* ---------- tiny helpers ---------- */
   let toastTimer;
@@ -127,60 +129,117 @@
     pushHistory(); Object.assign(it, patch); redraw(it.page);
   }
 
-  /* ---------- opening a PDF ---------- */
-  async function openPdf(file) {
-    if (!file) return;
-    if (dirty && !confirm('You have unsaved changes. Open a different PDF anyway?')) return;
-    if (file.size > MAX_BYTES) { toast('That file is too large (limit 150 MB).', true); return; }
-    const token = ++loadToken;
+  /* ---------- opening & combining PDFs ---------- */
+  async function readPdf(file) {                       // -> source {id,name,bytes,doc} or null (toasts why)
+    if (file.size > MAX_BYTES) { toast(`${file.name}: too large (limit 150 MB).`, true); return null; }
     let bytes;
-    try { bytes = new Uint8Array(await file.arrayBuffer()); } catch { toast('Could not read that file.', true); return; }
-    if (String.fromCharCode(...bytes.slice(0, 5)) !== '%PDF-') { toast('That does not look like a PDF file.', true); return; }
-    let doc;
+    try { bytes = new Uint8Array(await file.arrayBuffer()); } catch { toast('Could not read ' + file.name + '.', true); return null; }
+    if (String.fromCharCode(...bytes.slice(0, 5)) !== '%PDF-') { toast(file.name + ' does not look like a PDF file.', true); return null; }
     try {
-      doc = await pdfjs.getDocument({ data: bytes.slice(), isEvalSupported: false, enableXfa: false }).promise;
+      const doc = await pdfjs.getDocument({ data: bytes.slice(), isEvalSupported: false, enableXfa: false }).promise;
+      return { id: nextSrc++, name: file.name || 'document.pdf', bytes, doc };
     } catch (e) {
-      toast(e && e.name === 'PasswordException' ? 'This PDF is password-protected and cannot be opened.' : 'Could not open this PDF.', true); return;
+      toast(e && e.name === 'PasswordException' ? file.name + ' is password-protected and cannot be opened.' : 'Could not open ' + file.name + '.', true);
+      return null;
     }
-    if (token !== loadToken) return;
-    if (pdfDoc) pdfDoc.destroy();
-    pdfDoc = doc; pdfBytes = bytes; fileName = file.name || 'form.pdf';
+  }
+  async function modelsFor(src) {                      // one page model per page of the source
+    const out = [];
+    for (let i = 0; i < src.doc.numPages; i++) {
+      const page = await src.doc.getPage(i + 1), vp = page.getViewport({ scale: 1 });
+      out.push({ n: 0, w: vp.width, h: vp.height, rot: page.rotate % 360, page, src, idx: i, task: null, rendered: 0 });
+    }
+    return out;
+  }
+
+  async function openPdf(file) {                       // replaces the current document
+    if (!file) return;
+    if (hasDoc() && dirty && !confirm('You have unsaved changes. Open a different PDF anyway?')) return;
+    const token = ++loadToken;
+    const src = await readPdf(file); if (!src) return;
+    const models = await modelsFor(src);
+    if (token !== loadToken) { src.doc.destroy(); return; }
+    sources.forEach(s => s.doc.destroy()); sources = [src]; fileName = src.name;
     items = []; history = []; selected = null; nextId = 1; dirty = false; curPage = 1;
     $('undo').disabled = true; $('del').disabled = true;
-    $('fileName').textContent = fileName; $('fileName').title = fileName; $('fileName').classList.add('has');
-    document.title = fileName + ' – Fill PDF';
     document.body.classList.add('loaded'); $('toolbar').hidden = false;
-    ['save', 'saveWork', 'loadWorkBtn'].forEach(i => { $(i).disabled = false; });
-    await buildPages(token);
-    stage.scrollTo(0, 0);
-    setTool('text');
-    // XFA forms render as a "please wait" placeholder; warn the user
-    try {
-      const probe = await pdfjs.getDocument({ data: bytes.slice(), isEvalSupported: false, enableXfa: true }).promise;
+    ['save', 'saveWork', 'loadWorkBtn', 'addBtn2'].forEach(i => { $(i).disabled = false; });
+    pages = models; renumber(); rebuildDom(); updateFileLabel();
+    stage.scrollTo(0, 0); activateTool('text');
+    if (pages.some(p => p.rot)) toast('Some pages are rotated. Placing items on rotated pages is not supported.', true);
+    try {                                              // XFA forms render as a "please wait" placeholder; warn the user
+      const probe = await pdfjs.getDocument({ data: src.bytes.slice(), isEvalSupported: false, enableXfa: true }).promise;
       if (probe.isPureXfa) toast('This is a dynamic XFA form and cannot be filled here. Use the form’s printable PDF version.', true);
       probe.destroy();
     } catch { /* ignore */ }
   }
 
-  async function buildPages(token) {
-    pagesEl.textContent = ''; $('thumbs').textContent = ''; pages = [];
-    thumbObserver && thumbObserver.disconnect();
-    for (let n = 1; n <= pdfDoc.numPages; n++) {
-      const page = await pdfDoc.getPage(n);
-      if (token !== loadToken) return;
-      const vp = page.getViewport({ scale: 1 });
-      const el = document.createElement('div'); el.className = 'page';
-      const canvas = document.createElement('canvas');
-      const layer = document.createElement('div'); layer.className = 'layer';
-      const ghost = document.createElement('div'); ghost.className = 'ghost';
-      const num = document.createElement('div'); num.className = 'num'; num.textContent = n;
-      el.append(canvas, layer, ghost, num); pagesEl.appendChild(el);
-      const p = { n, el, canvas, layer, ghost, w: vp.width, h: vp.height, rot: page.rotate % 360, page, task: null, rendered: 0 };
-      pages.push(p); attachLayer(p);
-      addThumb(p);
+  async function addPdfs(files, at = pages.length) {   // inserts the pages of one or more PDFs at position `at`
+    files = [...files].filter(isPdf);
+    if (!files.length) { toast('Please choose PDF files.', true); return; }
+    if (!hasDoc()) { await openPdf(files[0]); files = files.slice(1); at = pages.length; if (!files.length) return; }
+    let pos = clamp(at, 0, pages.length), added = 0;
+    for (const f of files) {
+      const total = sources.reduce((s, x) => s + x.bytes.length, 0) + f.size;
+      if (total > MAX_TOTAL) { toast('The combined files are too large (limit 300 MB).', true); break; }
+      const src = await readPdf(f); if (!src) continue;
+      if (pages.length + src.doc.numPages > MAX_PAGES) { toast(`Too many pages (limit ${MAX_PAGES}).`, true); src.doc.destroy(); break; }
+      const models = await modelsFor(src);
+      sources.push(src);
+      const list = pages.slice(); list.splice(pos, 0, ...models); restructure(list);
+      pos += models.length; added += models.length;
     }
-    computeScale(); layout();
-    if (pages.some(p => p.rot)) toast('Some pages are rotated. Placing items on rotated pages is not supported.', true);
+    if (added) toast(`Added ${added} page${added === 1 ? '' : 's'}. Save PDF to download the combined file.`);
+  }
+
+  const renumber = () => pages.forEach((p, i) => { p.n = i + 1; });
+  // Apply a new page list (reordered / added / removed). Items follow their pages; items on removed pages go.
+  function restructure(list) {
+    const old = pages, pos = new Map(list.map((p, i) => [p, i + 1]));
+    items = items.map(it => ({ ...it, page: pos.get(old[it.page - 1]) })).filter(it => it.page);
+    old.forEach(p => { if (p.task) { try { p.task.cancel(); } catch { /* ignore */ } } });
+    pages = list; renumber();
+    sources = sources.filter(s => pages.some(p => p.src === s) || (s.doc.destroy(), false));
+    selected = null; history = []; dirty = true; curPage = clamp(curPage, 1, pages.length);
+    $('undo').disabled = true; $('del').disabled = true;
+    rebuildDom(); updateFileLabel();
+  }
+  function moveTo(from, idx) {                         // idx = insertion slot (0..pages.length) in the current order
+    if (idx === from || idx === from + 1) return;
+    const list = pages.slice(), [m] = list.splice(from, 1); list.splice(idx > from ? idx - 1 : idx, 0, m);
+    restructure(list);
+  }
+  function removePage(p) {
+    if (pages.length === 1) { toast('A document needs at least one page.', true); return; }
+    const n = items.filter(i => i.page === p.n).length;
+    if (n && !confirm(`Remove page ${p.n}? Its ${n} item${n === 1 ? '' : 's'} will be removed too.`)) return;
+    restructure(pages.filter(x => x !== p));
+    toast(`Removed page ${p.n}.`);
+  }
+  function updateFileLabel() {
+    const f = $('fileName'), first = sources[0] ? sources[0].name : 'No file open';
+    if (sources[0]) fileName = sources[0].name;
+    const extra = sources.length - 1;
+    f.textContent = extra > 0 ? `${first} + ${extra} more` : first;
+    f.title = sources.map(s => s.name).join('\n') || first; f.classList.toggle('has', sources.length > 0);
+    document.title = (sources.length ? first + (extra > 0 ? ` + ${extra}` : '') + ' – ' : '') + 'Fill PDF';
+  }
+
+  function buildPageDom(p) {
+    const el = document.createElement('div'); el.className = 'page';
+    const canvas = document.createElement('canvas');
+    const layer = document.createElement('div'); layer.className = 'layer';
+    const ghost = document.createElement('div'); ghost.className = 'ghost';
+    const num = document.createElement('div'); num.className = 'num'; num.textContent = p.n;
+    el.append(canvas, layer, ghost, num); pagesEl.appendChild(el);
+    Object.assign(p, { el, canvas, layer, ghost, task: null, rendered: 0 });
+    attachLayer(p);
+  }
+  function rebuildDom() {
+    thumbObserver && thumbObserver.disconnect();
+    pagesEl.textContent = ''; thumbList.textContent = '';
+    pages.forEach(p => { buildPageDom(p); addThumb(p); });
+    computeScale(); layout(); activateTool(tool); updatePageInfo();
   }
 
   /* ---------- layout & rendering ---------- */
@@ -228,7 +287,7 @@
     });
   }
   function updatePageInfo() {
-    $('pageinfo').textContent = pdfDoc ? `Page ${curPage} of ${pdfDoc.numPages}` : '';
+    $('pageinfo').textContent = hasDoc() ? `Page ${curPage} of ${pages.length}` : '';
     document.querySelectorAll('.thumb').forEach(t => {
       const on = +t.dataset.n === curPage; t.classList.toggle('cur', on);
       if (on && t.dataset.lastCur !== '1') { t.scrollIntoView({ block: 'nearest' }); }
@@ -239,10 +298,10 @@
   let resizeT;
   addEventListener('resize', () => {
     clearTimeout(resizeT);
-    resizeT = setTimeout(() => { if (pdfDoc && fit) { computeScale(); layout(); } }, 150);
+    resizeT = setTimeout(() => { if (hasDoc() && fit) { computeScale(); layout(); } }, 150);
   });
 
-  /* ---------- thumbnails ---------- */
+  /* ---------- thumbnails / page list ---------- */
   const thumbObserver = 'IntersectionObserver' in window ? new IntersectionObserver(entries => {
     entries.forEach(async en => {
       if (!en.isIntersecting) return;
@@ -254,15 +313,65 @@
       try { await p.page.render({ canvasContext: c.getContext('2d'), viewport: vp }).promise; } catch { /* ignore */ }
     });
   }, { root: $('thumbs'), rootMargin: '200px' }) : null;
+
+  let dragSrc = null;                                  // page being reordered
   function addThumb(p) {
-    const b = document.createElement('button'); b.className = 'thumb'; b.dataset.n = p.n; b.setAttribute('aria-label', 'Go to page ' + p.n);
-    const c = document.createElement('canvas'); c.width = 110; c.height = Math.round(110 * p.h / p.w);
-    c.style.aspectRatio = `${p.w} / ${p.h}`;
+    const w = document.createElement('div');
+    w.className = 'thumb s' + (sources.indexOf(p.src) % 6); w.dataset.n = p.n; w.draggable = true;
+    w.title = `${p.src.name} · page ${p.idx + 1}`;
+    const go = document.createElement('button'); go.type = 'button'; go.className = 'thumb-go'; go.setAttribute('aria-label', 'Go to page ' + p.n);
+    const c = document.createElement('canvas'); c.width = 110; c.height = Math.round(110 * p.h / p.w); c.style.aspectRatio = `${p.w} / ${p.h}`;
     const s = document.createElement('span'); s.textContent = p.n;
-    b.append(c, s); $('thumbs').appendChild(b);
-    b.onclick = () => { p.el.scrollIntoView({ block: 'start', behavior: 'smooth' }); };
-    thumbObserver && thumbObserver.observe(b);
+    go.append(c, s);
+    const del = document.createElement('button'); del.type = 'button'; del.className = 'thumb-del'; del.textContent = '×';
+    del.title = 'Remove this page'; del.setAttribute('aria-label', 'Remove page ' + p.n);
+    w.append(go, del); thumbList.appendChild(w);
+    go.onclick = () => { p.el.scrollIntoView({ block: 'start', behavior: 'smooth' }); };
+    del.onclick = e => { e.stopPropagation(); removePage(p); };
+    go.addEventListener('keydown', e => {              // keyboard reordering
+      if (!e.altKey || (e.key !== 'ArrowUp' && e.key !== 'ArrowDown')) return;
+      e.preventDefault(); const from = p.n - 1, to = from + (e.key === 'ArrowUp' ? -1 : 2);
+      if (to < 0 || to > pages.length) return;
+      moveTo(from, to);
+      const nb = thumbList.children[clamp(e.key === 'ArrowUp' ? from - 1 : from + 1, 0, pages.length - 1)];
+      nb && nb.querySelector('.thumb-go').focus();
+    });
+    w.addEventListener('dragstart', e => {
+      dragSrc = p; w.classList.add('dragging');
+      e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', 'page ' + p.n);
+    });
+    w.addEventListener('dragend', () => { dragSrc = null; w.classList.remove('dragging'); clearInsert(); });
+    thumbObserver && thumbObserver.observe(w);
   }
+
+  function dropIndex(y) {
+    const ts = [...thumbList.children]; let i = 0;
+    for (; i < ts.length; i++) { const r = ts[i].getBoundingClientRect(); if (y < r.top + r.height / 2) break; }
+    return i;
+  }
+  function clearInsert() {
+    thumbList.classList.remove('ins-end'); $('thumbs').classList.remove('over');
+    thumbList.querySelectorAll('.ins-before').forEach(t => t.classList.remove('ins-before'));
+  }
+  function showInsert(i) {
+    clearInsert(); const ts = thumbList.children;
+    if (i < ts.length) ts[i].classList.add('ins-before'); else thumbList.classList.add('ins-end');
+  }
+  const thumbsEl = $('thumbs');
+  thumbsEl.addEventListener('dragover', e => {
+    const files = hasFiles(e); if (!files && !dragSrc) return;
+    e.preventDefault(); e.dataTransfer.dropEffect = dragSrc ? 'move' : 'copy';
+    if (files) thumbsEl.classList.add('over');
+    showInsert(dropIndex(e.clientY));
+  });
+  thumbsEl.addEventListener('dragleave', e => { if (!thumbsEl.contains(e.relatedTarget)) clearInsert(); });
+  thumbsEl.addEventListener('drop', e => {
+    const files = hasFiles(e); if (!files && !dragSrc) return;
+    e.preventDefault(); e.stopPropagation();
+    const idx = dropIndex(e.clientY); clearInsert();
+    if (dragSrc) { const from = dragSrc.n - 1; dragSrc = null; moveTo(from, idx); }
+    else { endFileDrag(); addPdfs(e.dataTransfer.files, idx); }
+  });
 
   /* ---------- items ---------- */
   function redraw(n) {
@@ -436,11 +545,25 @@
 
   /* ---------- export ---------- */
   async function savePdf() {
-    if (!pdfDoc) return;
+    if (!hasDoc()) return;
     const { PDFDocument, StandardFonts, rgb, LineCapStyle } = PDFLib;
     const btn = $('save'); btn.disabled = true; btn.textContent = 'Saving…';
     try {
-      const doc = await PDFDocument.load(pdfBytes, { ignoreEncryption: true });
+      const merged = !(sources.length === 1 && pages.length === sources[0].doc.numPages && pages.every((p, i) => p.idx === i));
+      const load = async s => {
+        const d = await PDFDocument.load(s.bytes, { ignoreEncryption: true });
+        if (d.isEncrypted) throw new Error('ENCRYPTED');
+        return d;
+      };
+      let doc;
+      if (!merged) doc = await load(sources[0]);
+      else {                                           // build a new document from the selected pages, in order
+        doc = await PDFDocument.create(); const cache = new Map();
+        for (const p of pages) {
+          let sd = cache.get(p.src); if (!sd) { sd = await load(p.src); cache.set(p.src, sd); }
+          const [cp] = await doc.copyPages(sd, [p.idx]); doc.addPage(cp);
+        }
+      }
       const font = await doc.embedFont(StandardFonts.Helvetica);
       const fontBold = await doc.embedFont(StandardFonts.HelveticaBold);
       const pgs = doc.getPages(); let replaced = false;
@@ -468,11 +591,14 @@
         }
       }
       const out = await doc.save();
-      download(new Blob([out], { type: 'application/pdf' }), baseName() + '-filled.pdf');
+      download(new Blob([out], { type: 'application/pdf' }), baseName() + (merged ? '-combined' : '-filled') + '.pdf');
       dirty = false;
       toast(replaced ? 'Saved. Some characters are not supported by the PDF font and were replaced with “?”.' : 'Saved to your Downloads folder. The original file was not changed.', replaced);
     } catch (e) {
-      console.error(e); toast('Could not save this PDF.', true);
+      console.error(e);
+      toast(e && e.message === 'ENCRYPTED'
+        ? 'One of these PDFs is encrypted (restricted), so it cannot be saved here. Print it to a new PDF first (Print → Save as PDF), then open that copy.'
+        : 'Could not save this PDF.', true);
     } finally { btn.disabled = false; btn.textContent = 'Save PDF'; }
   }
 
@@ -496,7 +622,7 @@
     });
   }
   async function openSignDialog() {
-    if (!pdfDoc) { toast('Open a PDF first.', true); return; }
+    if (!hasDoc()) { toast('Open a PDF first.', true); return; }
     await loadFonts(); buildSigOptions();
     $('sigName').value = sig ? sig.text : lastName; if (sig) sigFont = sig.font;
     paintSigPreviews(); $('signDialog').showModal(); $('sigName').focus(); $('sigName').select();
@@ -515,7 +641,10 @@
   /* ---------- wiring ---------- */
   const pick = () => $('file').click();
   $('openBtn').onclick = pick; $('openBtn2').onclick = pick;
-  $('file').onchange = e => { openPdf(e.target.files[0]); e.target.value = ''; };
+  $('file').onchange = e => { const fs = [...e.target.files]; e.target.value = ''; if (fs.length > 1) addPdfs(fs); else openPdf(fs[0]); };
+  const pickAdd = () => { $('moreMenu').open = false; $('addFile').click(); };
+  $('addBtn').onclick = pickAdd; $('addBtn2').onclick = pickAdd;
+  $('addFile').onchange = e => { const fs = [...e.target.files]; e.target.value = ''; if (fs.length) addPdfs(fs); };
   document.querySelectorAll('#tools button').forEach(b => { b.onclick = () => setTool(b.dataset.tool); });
   document.querySelectorAll('.sw').forEach(b => { b.onclick = () => { setColor(b.dataset.color); if (selected != null) changeSelected({ color: b.dataset.color }); }; });
   $('sizeUp').onclick = () => adjustSize(1);
@@ -532,12 +661,12 @@
 
   $('saveWork').onclick = () => {
     $('moreMenu').open = false;
-    download(new Blob([JSON.stringify({ app: 'fill-pdf', v: 1, file: fileName, items }, null, 1)], { type: 'application/json' }), baseName() + '.progress.json');
+    download(new Blob([JSON.stringify({ app: 'fill-pdf', v: 1, file: fileName, pages: pages.length, items }, null, 1)], { type: 'application/json' }), baseName() + '.progress.json');
     toast('Progress saved. Load it later with the same PDF.');
   };
   $('loadWorkBtn').onclick = () => { $('moreMenu').open = false; $('loadWork').click(); };
   $('loadWork').onchange = async e => {
-    const f = e.target.files[0]; e.target.value = ''; if (!f || !pdfDoc) return;
+    const f = e.target.files[0]; e.target.value = ''; if (!f || !hasDoc()) return;
     try {
       if (f.size > 5 * 1024 * 1024) throw new Error('big');
       const d = JSON.parse(await f.text());
@@ -545,7 +674,7 @@
       pushHistory(); items = loaded; nextId = items.length + 1; select(null);
       pages.forEach(p => redraw(p.n));
       toast(`Loaded ${items.length} item${items.length === 1 ? '' : 's'}.`);
-      if (d.file && d.file !== fileName) toast('Loaded. Note: this progress file was saved for a different PDF.', true);
+      if ((d.file && d.file !== fileName) || (d.pages && d.pages !== pages.length)) toast('Loaded. Note: this progress file was saved for a different PDF or page order.', true);
     } catch { toast('That is not a valid progress file.', true); }
   };
   document.addEventListener('click', e => { const m = $('moreMenu'); if (m.open && !m.contains(e.target)) m.open = false; });
@@ -553,12 +682,12 @@
   addEventListener('keydown', e => {
     const ae = document.activeElement;
     if (ae && (ae.isContentEditable || ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA')) return;
-    if ($('shortcuts').open || $('signDialog').open) return;
+    if ($('shortcuts').open || $('signDialog').open || $('dropDialog').open) return;
     const mod = e.ctrlKey || e.metaKey, k = e.key.toLowerCase();
     if (mod && k === 'z') { e.preventDefault(); undo(); return; }
     if (mod && k === 's') { e.preventDefault(); savePdf(); return; }
-    if (mod && k === 'b' && pdfDoc) { e.preventDefault(); $('boldBtn').click(); return; }
-    if (mod || e.altKey || !pdfDoc) return;
+    if (mod && k === 'b' && hasDoc()) { e.preventDefault(); $('boldBtn').click(); return; }
+    if (mod || e.altKey || !hasDoc()) return;
     if (e.key === 'Delete' || e.key === 'Backspace') { if (selected != null) { e.preventDefault(); deleteSel(); } return; }
     if (e.key === 'Escape') { select(null); return; }
     if (selected != null && e.key.startsWith('Arrow')) {
@@ -569,17 +698,29 @@
     const t = { t: 'text', c: 'check', x: 'cross', s: 'sign', v: 'select' }[k]; if (t) setTool(t);
   });
 
-  // drag & drop a PDF anywhere
-  let dragDepth = 0;
+  // drag & drop PDF files
+  let dragDepth = 0, pendingDrop = [];
   const hasFiles = e => e.dataTransfer && [...e.dataTransfer.types].includes('Files');
-  addEventListener('dragenter', e => { if (!hasFiles(e)) return; e.preventDefault(); dragDepth++; $('dropVeil').hidden = false; $('dropCard').classList.add('over'); });
-  addEventListener('dragover', e => { if (hasFiles(e)) e.preventDefault(); });
-  addEventListener('dragleave', e => { if (!hasFiles(e)) return; if (--dragDepth <= 0) { dragDepth = 0; $('dropVeil').hidden = true; $('dropCard').classList.remove('over'); } });
-  addEventListener('drop', e => {
-    if (!hasFiles(e)) return; e.preventDefault(); dragDepth = 0; $('dropVeil').hidden = true; $('dropCard').classList.remove('over');
-    const f = e.dataTransfer.files[0];
-    if (f && (/\.pdf$/i.test(f.name) || f.type === 'application/pdf')) openPdf(f); else toast('Please drop a PDF file.', true);
+  function endFileDrag() { dragDepth = 0; $('dropVeil').hidden = true; $('dropCard').classList.remove('over'); }
+  addEventListener('dragenter', e => {
+    if (!hasFiles(e)) return; e.preventDefault(); dragDepth++;
+    $('dropVeil').textContent = hasDoc() ? 'Drop on the page list to insert pages here, or drop anywhere to choose' : 'Drop the PDF to open it';
+    $('dropVeil').hidden = false; $('dropCard').classList.add('over');
   });
+  addEventListener('dragover', e => { if (hasFiles(e)) e.preventDefault(); });
+  addEventListener('dragleave', e => { if (!hasFiles(e)) return; if (--dragDepth <= 0) endFileDrag(); });
+  addEventListener('drop', e => {
+    if (!hasFiles(e)) return; e.preventDefault(); endFileDrag();
+    const files = [...e.dataTransfer.files].filter(isPdf);
+    if (!files.length) { toast('Please drop PDF files.', true); return; }
+    if (!hasDoc()) { addPdfs(files); return; }                      // nothing open yet: open (and combine if several)
+    pendingDrop = files;
+    $('dropMsg').textContent = files.length === 1 ? `“${files[0].name}”` : `${files.length} PDF files`;
+    $('dropDialog').showModal();
+  });
+  $('dropAdd').onclick = () => { $('dropDialog').close(); addPdfs(pendingDrop); };
+  $('dropReplace').onclick = async () => { $('dropDialog').close(); const [f, ...rest] = pendingDrop; await openPdf(f); if (rest.length && hasDoc()) addPdfs(rest); };
+  $('dropCancel').onclick = () => $('dropDialog').close();
   addEventListener('beforeunload', e => { if (dirty) { e.preventDefault(); e.returnValue = ''; } });
 
   setSize(10); setTool('text'); hint('Open a PDF to begin.');
