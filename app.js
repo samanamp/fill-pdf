@@ -10,12 +10,16 @@
   const ZOOMS = [0.5, 0.75, 1, 1.25, 1.5, 2, 3];
   const MAX_BYTES = 150 * 1024 * 1024;
   const MIN_SIZE = 5, MAX_SIZE = 48;
+  const SIG_FONTS = ['Great Vibes', 'Allura', 'Dancing Script', 'Sacramento', 'Mrs Saint Delafield', 'Homemade Apple'];
+  const SIG_MIN = 8, SIG_MAX = 100, SIG_K = 4;       // SIG_K = render scale for crisp signatures
 
   /* ---------- state ---------- */
   let pdfDoc = null, pdfBytes = null, fileName = 'form.pdf';
   let pages = [];                 // {n, el, canvas, layer, ghost, w, h, rot, page, task, rendered}
   let items = [];                 // {id, page, type, x, y, size, color, text}
   let tool = 'text', color = 'black', size = 10, bold = false;
+  let sig = null, signSize = 28, lastName = '';   // sig = {text, font} chosen in the dialog
+  const sigCache = new Map();
   let scale = 1.25, fit = true;
   let selected = null, nextId = 1, history = [], dirty = false, curPage = 1;
   let loadToken = 0;
@@ -43,6 +47,39 @@
     s.appendChild(p); return s;
   }
 
+  /* ---------- signatures (rendered to a tight transparent PNG so screen == PDF) ---------- */
+  let fontsReady = null;
+  function loadFonts() {
+    if (!fontsReady) fontsReady = Promise.all(SIG_FONTS.map(f => document.fonts.load(`32px "${f}"`, 'Abc'))).catch(() => {});
+    return fontsReady;
+  }
+  function sigImage(it) {
+    const key = [it.text, it.font, it.size, it.color].join('|');
+    let c = sigCache.get(key); if (c) return c;
+    const S = it.size * SIG_K, cv = document.createElement('canvas'), ctx = cv.getContext('2d');
+    const font = `${S}px "${it.font}"`; ctx.font = font;
+    const m = ctx.measureText(it.text), pad = Math.ceil(S * 0.12);
+    const left = Math.ceil(m.actualBoundingBoxLeft), right = Math.ceil(m.actualBoundingBoxRight);
+    const asc = Math.ceil(m.actualBoundingBoxAscent), desc = Math.ceil(m.actualBoundingBoxDescent);
+    cv.width = Math.max(left + right, 1) + pad * 2; cv.height = Math.max(asc + desc, 1) + pad * 2;
+    ctx.font = font; ctx.fillStyle = CSS_COLOR[it.color] || '#000'; ctx.textBaseline = 'alphabetic';
+    ctx.fillText(it.text, pad + left, pad + asc);
+    c = { url: cv.toDataURL('image/png'), w: cv.width / SIG_K, h: cv.height / SIG_K };
+    if (sigCache.size > 80) sigCache.clear();
+    sigCache.set(key, c); return c;
+  }
+  function sigEl(it, px) {                     // <img> for a signature at the given scale
+    const c = sigImage(it), img = document.createElement('img');
+    img.src = c.url; img.alt = ''; img.draggable = false;
+    img.style.width = c.w * px + 'px'; img.style.height = c.h * px + 'px'; return img;
+  }
+  // top-left of an item's element, in CSS px
+  function originOf(it) {
+    if (it.type === 'text') return [it.x * scale, it.y * scale];
+    if (it.type === 'sign') { const c = sigImage(it); return [(it.x - c.w / 2) * scale, (it.y - c.h / 2) * scale]; }
+    const b = markBox(it) * scale; return [it.x * scale - b / 2, it.y * scale - b / 2];
+  }
+
   function pushHistory() {
     history.push(JSON.stringify(items)); if (history.length > 200) history.shift();
     $('undo').disabled = false; dirty = true;
@@ -51,12 +88,17 @@
   /* ---------- tools / controls ---------- */
   const HINTS = {
     text: 'Click where the text should start, then type. Enter to finish.',
+    sign: 'Click where your signature should go. Press S to change it.',
     check: 'Click the middle of a box to tick it.',
     cross: 'Click the middle of a box to put an X in it.',
     select: 'Drag items to move them. Double-click text to edit it.'
   };
-  function setTool(t) {
-    tool = t;
+  function setTool(t) {                        // user-facing: the Sign tool opens the dialog first
+    if (t === 'sign' && (!sig || tool === 'sign')) { openSignDialog(); return; }
+    activateTool(t);
+  }
+  function activateTool(t) {
+    tool = t; showSize();
     document.querySelectorAll('#tools button').forEach(b => b.classList.toggle('on', b.dataset.tool === t));
     pages.forEach(p => { p.layer.className = 'layer tool-' + t + (p.rot ? ' locked' : ''); p.ghost.style.display = 'none'; });
     hint(HINTS[t]);
@@ -65,9 +107,20 @@
     color = c;
     document.querySelectorAll('.sw').forEach(b => { const on = b.dataset.color === c; b.classList.toggle('on', on); b.setAttribute('aria-checked', on); });
   }
-  function setSize(s) { size = clamp(Math.round(s), MIN_SIZE, MAX_SIZE); $('sizeOut').textContent = size; }
+  const showSize = () => { $('sizeOut').textContent = tool === 'sign' ? signSize : size; };
+  function setSize(s) { size = clamp(Math.round(s), MIN_SIZE, MAX_SIZE); showSize(); }
+  function adjustSize(d) {
+    const it = itemById(selected);
+    if (it && it.type === 'sign') { const s = clamp(it.size + d * 2, SIG_MIN, SIG_MAX); changeSelected({ size: s }); $('sizeOut').textContent = s; return; }
+    if (!it && tool === 'sign') { signSize = clamp(signSize + d * 2, SIG_MIN, SIG_MAX); showSize(); return; }
+    setSize(size + d); if (it) changeSelected({ size });
+  }
   function setBold(b) { bold = !!b; $('boldBtn').setAttribute('aria-pressed', bold); }
-  function syncControlsTo(it) { setSize(it.size); setColor(it.color); if (it.type === 'text') setBold(it.bold); }
+  function syncControlsTo(it) {
+    setColor(it.color);
+    if (it.type === 'sign') { $('sizeOut').textContent = it.size; return; }
+    setSize(it.size); if (it.type === 'text') setBold(it.bold);
+  }
 
   function changeSelected(patch) {
     const it = items.find(i => i.id === selected); if (!it) return;
@@ -219,17 +272,17 @@
   }
   function addEl(p, it) {
     const el = document.createElement('div');
-    el.className = 'item ' + (it.type === 'text' ? 'text' : 'mark') + (it.bold ? ' bold' : '') + (it.id === selected ? ' sel' : '');
+    el.className = 'item ' + (it.type === 'text' ? 'text' : it.type === 'sign' ? 'sign' : 'mark') + (it.bold ? ' bold' : '') + (it.id === selected ? ' sel' : '');
     el.dataset.id = it.id;
     if (it.type === 'text') {
       el.style.fontSize = it.size * scale + 'px'; el.style.color = CSS_COLOR[it.color] || '#000';
       el.textContent = it.text;
-      el.style.left = it.x * scale + 'px'; el.style.top = it.y * scale + 'px';
+    } else if (it.type === 'sign') {
+      el.appendChild(sigEl(it, scale));
     } else {
-      const b = markBox(it) * scale;
-      el.appendChild(markSVG(it.type, b, it.color));
-      el.style.left = (it.x * scale - b / 2) + 'px'; el.style.top = (it.y * scale - b / 2) + 'px';
+      el.appendChild(markSVG(it.type, markBox(it) * scale, it.color));
     }
+    const [ox, oy] = originOf(it); el.style.left = ox + 'px'; el.style.top = oy + 'px';
     p.layer.appendChild(el); return el;
   }
   function select(id) {
@@ -271,10 +324,15 @@
   function attachLayer(p) {
     const L = p.layer;
     L.addEventListener('pointermove', e => {
-      if (e.pointerType !== 'mouse' || (tool !== 'check' && tool !== 'cross') || p.rot || e.target.closest('.item')) { p.ghost.style.display = 'none'; return; }
-      const r = L.getBoundingClientRect(); const b = size * 1.15 * scale;
-      p.ghost.textContent = ''; p.ghost.appendChild(markSVG(tool, b, color));
-      p.ghost.style.left = (e.clientX - r.left - b / 2) + 'px'; p.ghost.style.top = (e.clientY - r.top - b / 2) + 'px'; p.ghost.style.display = 'block';
+      const ghostTool = tool === 'check' || tool === 'cross' || (tool === 'sign' && sig);
+      if (e.pointerType !== 'mouse' || !ghostTool || p.rot || e.target.closest('.item')) { p.ghost.style.display = 'none'; return; }
+      const r = L.getBoundingClientRect(); let w, h;
+      p.ghost.textContent = '';
+      if (tool === 'sign') {
+        const it = { text: sig.text, font: sig.font, size: signSize, color }, c = sigImage(it);
+        p.ghost.appendChild(sigEl(it, scale)); w = c.w * scale; h = c.h * scale;
+      } else { w = h = size * 1.15 * scale; p.ghost.appendChild(markSVG(tool, w, color)); }
+      p.ghost.style.left = (e.clientX - r.left - w / 2) + 'px'; p.ghost.style.top = (e.clientY - r.top - h / 2) + 'px'; p.ghost.style.display = 'block';
     });
     L.addEventListener('pointerleave', () => { p.ghost.style.display = 'none'; });
 
@@ -287,10 +345,12 @@
       if (target) { startDrag(e, p, target); return; }
       if (p.rot) { toast('This page is rotated; placing items here is not supported.', true); return; }
       if (tool === 'select') { select(null); return; }
+      if (tool === 'sign' && !sig) { openSignDialog(); return; }
       const r = L.getBoundingClientRect();
       const x = (e.clientX - r.left) / scale, y = (e.clientY - r.top) / scale;
       pushHistory();
       const it = { id: nextId++, page: p.n, type: tool, x, y, size, color, bold: tool === 'text' && bold, text: '' };
+      if (tool === 'sign') { it.text = sig.text; it.font = sig.font; it.size = signSize; it.bold = false; }
       items.push(it); selected = it.id;
       p.ghost.style.display = 'none';
       if (tool === 'text') {
@@ -311,10 +371,7 @@
     const it = itemById(+target.dataset.id);
     select(it.id);
     const sx = e.clientX, sy = e.clientY, ox = it.x, oy = it.y; let moved = false;
-    const place = () => {
-      if (it.type === 'text') { target.style.left = it.x * scale + 'px'; target.style.top = it.y * scale + 'px'; }
-      else { const b = markBox(it) * scale; target.style.left = (it.x * scale - b / 2) + 'px'; target.style.top = (it.y * scale - b / 2) + 'px'; }
-    };
+    const place = () => { const [lx, ly] = originOf(it); target.style.left = lx + 'px'; target.style.top = ly + 'px'; };
     const move = ev => {
       const dx = (ev.clientX - sx) / scale, dy = (ev.clientY - sy) / scale;
       if (!moved && Math.hypot(dx, dy) * scale < 3) return;
@@ -362,13 +419,17 @@
     if (!Array.isArray(arr)) throw new Error('bad');
     const out = [];
     for (const i of arr.slice(0, 5000)) {
-      if (!i || !['text', 'check', 'cross'].includes(i.type)) continue;
+      if (!i || !['text', 'check', 'cross', 'sign'].includes(i.type)) continue;
       const page = Math.floor(+i.page);
       if (!(page >= 1 && page <= pages.length)) continue;
       const x = +i.x, y = +i.y, sz = +i.size;
       if (![x, y, sz].every(Number.isFinite)) continue;
-      out.push({ id: out.length + 1, page, type: i.type, x, y, size: clamp(sz, MIN_SIZE, MAX_SIZE),
-        color: COLORS[i.color] ? i.color : 'black', bold: i.type === 'text' && i.bold === true, text: i.type === 'text' ? String(i.text ?? '').slice(0, 500) : '' });
+      if (i.type === 'sign' && (!SIG_FONTS.includes(i.font) || !String(i.text ?? '').trim())) continue;
+      const isSign = i.type === 'sign';
+      out.push({ id: out.length + 1, page, type: i.type, x, y, size: isSign ? clamp(sz, SIG_MIN, SIG_MAX) : clamp(sz, MIN_SIZE, MAX_SIZE),
+        color: COLORS[i.color] ? i.color : 'black', bold: i.type === 'text' && i.bold === true,
+        text: i.type === 'text' ? String(i.text ?? '').slice(0, 500) : isSign ? String(i.text).slice(0, 40) : '',
+        ...(isSign ? { font: i.font } : {}) });
     }
     return out;
   }
@@ -383,11 +444,17 @@
       const font = await doc.embedFont(StandardFonts.Helvetica);
       const fontBold = await doc.embedFont(StandardFonts.HelveticaBold);
       const pgs = doc.getPages(); let replaced = false;
+      if (items.some(i => i.type === 'sign')) await loadFonts();
+      const sigImgs = new Map();
       const safe = s => [...s].map(ch => { try { font.encodeText(ch); return ch; } catch { replaced = true; return '?'; } }).join('');
       for (const it of items) {
         const pg = pgs[it.page - 1]; if (!pg) continue;
         const H = pg.getHeight(), col = rgb(...(COLORS[it.color] || COLORS.black));
-        if (it.type === 'text') {
+        if (it.type === 'sign') {
+          const c = sigImage(it);
+          if (!sigImgs.has(c.url)) sigImgs.set(c.url, await doc.embedPng(c.url));
+          pg.drawImage(sigImgs.get(c.url), { x: it.x - c.w / 2, y: H - it.y - c.h / 2, width: c.w, height: c.h });
+        } else if (it.type === 'text') {
           safe(it.text).split('\n').forEach((line, n) => {
             if (!line) return;
             pg.drawText(line, { x: it.x, y: H - it.y - it.size * 0.82 - n * it.size * 1.15, size: it.size, font: it.bold ? fontBold : font, color: col });
@@ -409,14 +476,50 @@
     } finally { btn.disabled = false; btn.textContent = 'Save PDF'; }
   }
 
+  /* ---------- signature dialog ---------- */
+  let sigFont = SIG_FONTS[0], sigBuilt = false;
+  function paintSigPreviews() {
+    const txt = $('sigName').value.trim() || 'Your name';
+    document.querySelectorAll('.sigopt').forEach(b => {
+      b.querySelector('.sigtxt').textContent = txt;
+      const on = b.dataset.font === sigFont; b.classList.toggle('on', on); b.setAttribute('aria-checked', on);
+    });
+  }
+  function buildSigOptions() {
+    if (sigBuilt) return; sigBuilt = true;
+    SIG_FONTS.forEach(f => {
+      const b = document.createElement('button'); b.type = 'button'; b.className = 'sigopt'; b.dataset.font = f;
+      b.setAttribute('role', 'radio'); b.setAttribute('aria-label', 'Style ' + f);
+      const t = document.createElement('span'); t.className = 'sigtxt'; t.style.fontFamily = `"${f}", cursive`;
+      const s = document.createElement('small'); s.textContent = f;
+      b.append(t, s); b.onclick = () => { sigFont = f; paintSigPreviews(); }; $('sigOpts').appendChild(b);
+    });
+  }
+  async function openSignDialog() {
+    if (!pdfDoc) { toast('Open a PDF first.', true); return; }
+    await loadFonts(); buildSigOptions();
+    $('sigName').value = sig ? sig.text : lastName; if (sig) sigFont = sig.font;
+    paintSigPreviews(); $('signDialog').showModal(); $('sigName').focus(); $('sigName').select();
+  }
+  function useSignature() {
+    const t = $('sigName').value.trim().slice(0, 40);
+    if (!t) { toast('Type your name first.', true); $('sigName').focus(); return; }
+    sig = { text: t, font: sigFont }; lastName = t;
+    $('signDialog').close(); activateTool('sign');
+  }
+  $('sigName').addEventListener('input', paintSigPreviews);
+  $('sigName').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); useSignature(); } });
+  $('sigUse').onclick = useSignature;
+  $('sigCancel').onclick = () => $('signDialog').close();
+
   /* ---------- wiring ---------- */
   const pick = () => $('file').click();
   $('openBtn').onclick = pick; $('openBtn2').onclick = pick;
   $('file').onchange = e => { openPdf(e.target.files[0]); e.target.value = ''; };
   document.querySelectorAll('#tools button').forEach(b => { b.onclick = () => setTool(b.dataset.tool); });
   document.querySelectorAll('.sw').forEach(b => { b.onclick = () => { setColor(b.dataset.color); if (selected != null) changeSelected({ color: b.dataset.color }); }; });
-  $('sizeUp').onclick = () => { setSize(size + 1); if (selected != null) changeSelected({ size }); };
-  $('sizeDown').onclick = () => { setSize(size - 1); if (selected != null) changeSelected({ size }); };
+  $('sizeUp').onclick = () => adjustSize(1);
+  $('sizeDown').onclick = () => adjustSize(-1);
   $('boldBtn').onclick = () => {
     setBold(!bold);
     const it = itemById(selected); if (it && it.type === 'text') changeSelected({ bold });
@@ -438,7 +541,7 @@
     try {
       if (f.size > 5 * 1024 * 1024) throw new Error('big');
       const d = JSON.parse(await f.text());
-      const loaded = cleanItems(d.items);
+      const loaded = cleanItems(d.items); await loadFonts();
       pushHistory(); items = loaded; nextId = items.length + 1; select(null);
       pages.forEach(p => redraw(p.n));
       toast(`Loaded ${items.length} item${items.length === 1 ? '' : 's'}.`);
@@ -450,7 +553,7 @@
   addEventListener('keydown', e => {
     const ae = document.activeElement;
     if (ae && (ae.isContentEditable || ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA')) return;
-    if ($('shortcuts').open) return;
+    if ($('shortcuts').open || $('signDialog').open) return;
     const mod = e.ctrlKey || e.metaKey, k = e.key.toLowerCase();
     if (mod && k === 'z') { e.preventDefault(); undo(); return; }
     if (mod && k === 's') { e.preventDefault(); savePdf(); return; }
@@ -463,7 +566,7 @@
       const d = { ArrowLeft: [-st, 0], ArrowRight: [st, 0], ArrowUp: [0, -st], ArrowDown: [0, st] }[e.key];
       if (d) { e.preventDefault(); nudge(...d); } return;
     }
-    const t = { t: 'text', c: 'check', x: 'cross', v: 'select' }[k]; if (t) setTool(t);
+    const t = { t: 'text', c: 'check', x: 'cross', s: 'sign', v: 'select' }[k]; if (t) setTool(t);
   });
 
   // drag & drop a PDF anywhere

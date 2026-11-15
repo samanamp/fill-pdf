@@ -1,10 +1,10 @@
 # Fill PDF
 
-Static, client-side PDF form filler: type text (normal or bold), tick boxes and cross boxes, then save.
+Static, client-side PDF form filler: type text (normal or bold), tick or cross boxes, add a typed signature in a handwriting style, then save.
 Files never leave the browser. Live at https://pdf.samankeon.com.
 
 Built on [pdf.js](https://github.com/mozilla/pdf.js) (display) and [pdf-lib](https://github.com/Hopding/pdf-lib) (save).
-Copies of both live in `lib/` under their own licenses (Apache-2.0 and MIT).
+Copies of both live in `lib/` under their own licenses (Apache-2.0 and MIT). Signature fonts live in `fonts/` (see `fonts/LICENSES.md`).
 
 ## Run locally
 `./run.sh` serves the folder on http://127.0.0.1:8765

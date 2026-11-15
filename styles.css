@@ -1,3 +1,9 @@
+@font-face { font-family: "Great Vibes"; src: url("fonts/great-vibes.woff2") format("woff2"); font-weight: 400; font-style: normal; font-display: swap; }
+@font-face { font-family: "Allura"; src: url("fonts/allura.woff2") format("woff2"); font-weight: 400; font-style: normal; font-display: swap; }
+@font-face { font-family: "Dancing Script"; src: url("fonts/dancing-script.woff2") format("woff2"); font-weight: 400; font-style: normal; font-display: swap; }
+@font-face { font-family: "Sacramento"; src: url("fonts/sacramento.woff2") format("woff2"); font-weight: 400; font-style: normal; font-display: swap; }
+@font-face { font-family: "Mrs Saint Delafield"; src: url("fonts/mrs-saint-delafield.woff2") format("woff2"); font-weight: 400; font-style: normal; font-display: swap; }
+@font-face { font-family: "Homemade Apple"; src: url("fonts/homemade-apple.woff2") format("woff2"); font-weight: 400; font-style: normal; font-display: swap; }
 :root {
   --bg: #eef0f4; --panel: #ffffff; --panel2: #f6f7f9; --ink: #1b2130; --muted: #646d7e;
   --line: #d9dde5; --accent: #2457d6; --accent-ink: #fff; --accent-soft: #e6edff;
@@ -85,6 +91,7 @@ body.loaded #thumbs { display: block; }
 .item.sel { outline: 1.5px dashed var(--sel); outline-offset: 3px; }
 .item[contenteditable="true"] { cursor: text; user-select: text; -webkit-user-select: text; outline: 1.5px solid var(--accent); outline-offset: 3px; background: rgba(255,230,90,.35); touch-action: auto; }
 .item svg { display: block; overflow: visible; }
+.item.sign img, .ghost img { display: block; max-width: none; -webkit-user-drag: none; user-select: none; pointer-events: none; }
 .ghost { position: absolute; pointer-events: none; opacity: .4; display: none; }
 
 /* ---------- empty state ---------- */
@@ -185,3 +192,17 @@ dialog form { text-align: right; }
 }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
 @media print { body > *:not(#pages) { display: none; } }
+
+/* ---------- signature dialog ---------- */
+#signDialog { width: min(660px, calc(100vw - 24px)); max-width: none; }
+.fld { display: grid; gap: 6px; font-weight: 600; margin-bottom: 14px; }
+.fld input { font: inherit; font-size: 18px; font-weight: 400; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel2); color: var(--ink); }
+.sigopts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin-bottom: 12px; }
+.sigopt { text-align: left; padding: 8px 12px 6px; background: #fff; color: #111; border: 2px solid var(--line); border-radius: 12px; cursor: pointer; overflow: hidden; }
+.sigopt:hover { border-color: var(--accent); }
+.sigopt.on { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
+.sigtxt { display: block; font-size: 36px; line-height: 1.5; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sigopt small { display: block; color: #667085; font: 11px system-ui, sans-serif; }
+.note { margin: 0 0 14px; color: var(--muted); font-size: 13px; }
+.dlg-actions { display: flex; justify-content: flex-end; gap: 8px; }
+@media (max-width: 520px) { .sigopts { grid-template-columns: 1fr; } }
