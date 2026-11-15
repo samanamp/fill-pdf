@@ -93,14 +93,14 @@
     sign: 'Click where your signature should go. Press S to change it.',
     check: 'Click the middle of a box to tick it.',
     cross: 'Click the middle of a box to put an X in it.',
-    select: 'Drag items to move them. Double-click text to edit it.'
+    select: 'Select text to copy it (Ctrl+C), or drag items to move them. Double-click your text to edit.'
   };
   function setTool(t) {                        // user-facing: the Sign tool opens the dialog first
     if (t === 'sign' && (!sig || tool === 'sign')) { openSignDialog(); return; }
     activateTool(t);
   }
   function activateTool(t) {
-    tool = t; showSize();
+    tool = t; showSize(); document.body.classList.toggle('mode-select', t === 'select');
     document.querySelectorAll('#tools button').forEach(b => b.classList.toggle('on', b.dataset.tool === t));
     pages.forEach(p => { p.layer.className = 'layer tool-' + t + (p.rot ? ' locked' : ''); p.ghost.style.display = 'none'; });
     hint(HINTS[t]);
@@ -230,9 +230,10 @@
     const canvas = document.createElement('canvas');
     const layer = document.createElement('div'); layer.className = 'layer';
     const ghost = document.createElement('div'); ghost.className = 'ghost';
+    const textEl = document.createElement('div'); textEl.className = 'textLayer';
     const num = document.createElement('div'); num.className = 'num'; num.textContent = p.n;
-    el.append(canvas, layer, ghost, num); pagesEl.appendChild(el);
-    Object.assign(p, { el, canvas, layer, ghost, task: null, rendered: 0 });
+    el.append(canvas, textEl, layer, ghost, num); pagesEl.appendChild(el);
+    Object.assign(p, { el, canvas, textEl, layer, ghost, task: null, textTask: null, rendered: 0 });
     attachLayer(p);
   }
   function rebuildDom() {
@@ -254,6 +255,7 @@
     $('zoomFit').title = fit ? 'Fit to width (on)' : 'Fit to width';
     pages.forEach(p => {
       p.el.style.width = p.w * scale + 'px'; p.el.style.height = p.h * scale + 'px';
+      p.textEl.textContent = '';                         // stale until the page is re-rendered
       p.rendered = 0; redraw(p.n);
     });
     renderVisible();
@@ -269,6 +271,15 @@
     p.task = task;
     try { await task.promise; } catch (e) { if (e && e.name === 'RenderingCancelledException') { p.rendered = 0; return; } }
     p.rendered = stamp;
+    renderText(p, vp);
+  }
+  async function renderText(p, vp) {                  // invisible, selectable text over the canvas
+    if (p.textTask) { try { p.textTask.cancel(); } catch { /* ignore */ } }
+    p.textEl.textContent = '';
+    try {
+      const t = pdfjs.renderTextLayer({ textContentSource: p.page.streamTextContent(), container: p.textEl, viewport: vp, textDivs: [] });
+      p.textTask = t; await t.promise;
+    } catch { /* cancelled, or the page has no text */ }
   }
   let raf = 0;
   function renderVisible() {
@@ -428,6 +439,10 @@
       e.preventDefault(); document.execCommand('insertText', false, (e.clipboardData.getData('text/plain') || '').slice(0, 500));
     });
   }
+
+  pagesEl.addEventListener('pointerdown', e => {
+    if (tool === 'select' && !e.target.closest('.item') && selected != null) select(null);
+  });
 
   /* ---------- pointer handling (one handler per page layer) ---------- */
   function attachLayer(p) {

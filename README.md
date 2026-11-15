@@ -1,6 +1,6 @@
 # Fill PDF
 
-Static, client-side PDF form filler: type text (normal or bold), tick or cross boxes, add a typed signature in a handwriting style, combine several PDFs (drag files onto the page list, drag pages to reorder, remove pages), then save.
+Static, client-side PDF form filler: type text (normal or bold), tick or cross boxes, add a typed signature in a handwriting style, combine several PDFs (drag files onto the page list, drag pages to reorder, remove pages), select and copy the PDF's text with the Select tool, then save.
 Files never leave the browser. Live at https://pdf.samankeon.com.
 
 Built on [pdf.js](https://github.com/mozilla/pdf.js) (display) and [pdf-lib](https://github.com/Hopding/pdf-lib) (save).

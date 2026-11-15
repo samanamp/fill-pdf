@@ -98,7 +98,15 @@ body.loaded #thumbs { display: block; }
 .layer { position: absolute; inset: 0; touch-action: pan-y pan-x; }
 .layer.tool-text { cursor: text; }
 .layer.tool-check, .layer.tool-cross { cursor: crosshair; }
-.layer.tool-select { cursor: default; }
+.layer.tool-select { cursor: default; pointer-events: none; }
+.layer.tool-select .item { pointer-events: auto; }
+
+/* invisible text layer: lets you select and copy the PDF's text (Select tool only) */
+.textLayer { position: absolute; inset: 0; overflow: hidden; line-height: 1; text-align: initial; opacity: 1;
+  pointer-events: none; user-select: none; -webkit-user-select: none; forced-color-adjust: none; }
+.textLayer span, .textLayer br { color: transparent; position: absolute; white-space: pre; cursor: text; transform-origin: 0% 0%; }
+.textLayer ::selection { background: rgba(36, 87, 214, .35); color: transparent; }
+body.mode-select .textLayer { pointer-events: auto; user-select: text; -webkit-user-select: text; }
 .layer.locked { cursor: not-allowed; }
 .page .num { position: absolute; left: 50%; bottom: -17px; transform: translateX(-50%); font-size: 11px; color: var(--muted); pointer-events: none; }
 
