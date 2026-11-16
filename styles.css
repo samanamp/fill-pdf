@@ -119,6 +119,13 @@ body.mode-select .textLayer { pointer-events: auto; user-select: text; -webkit-u
 .item svg { display: block; overflow: visible; }
 .item.sign img, .ghost img { display: block; max-width: none; -webkit-user-drag: none; user-select: none; pointer-events: none; }
 .ghost { position: absolute; pointer-events: none; opacity: .4; display: none; }
+/* redaction boxes: black on screen exactly as in the saved PDF */
+.layer.tool-redact { cursor: crosshair; }
+.item.redact { background: #000; }
+.item.redact .rh { position: absolute; right: -5px; bottom: -5px; width: 10px; height: 10px; border-radius: 2px;
+  background: var(--sel); border: 1.5px solid #fff; cursor: nwse-resize; display: none; }
+.item.redact.sel .rh { display: block; }
+.rband { position: absolute; background: rgba(0,0,0,.55); outline: 1.5px dashed var(--sel); pointer-events: none; }
 
 /* ---------- empty state ---------- */
 #empty { position: absolute; inset: 0; display: grid; place-items: center; padding: 20px; overflow: auto; }
@@ -156,6 +163,7 @@ body.loaded #empty { display: none; }
 }
 .seg button svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 .seg button span { font-size: 11px; }
+.seg button svg .fill { fill: currentColor; stroke: none; }
 .seg button:hover { background: var(--panel2); color: var(--ink); }
 .seg button.on { background: var(--accent-soft); color: var(--accent); }
 .sq { width: 32px; height: 32px; display: grid; place-items: center; background: none; border: 0; border-radius: 8px; cursor: pointer; font-size: 17px; }

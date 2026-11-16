@@ -79,6 +79,7 @@
   function originOf(it) {
     if (it.type === 'text') return [it.x * scale, it.y * scale];
     if (it.type === 'sign') { const c = sigImage(it); return [(it.x - c.w / 2) * scale, (it.y - c.h / 2) * scale]; }
+    if (it.type === 'redact') return [it.x * scale, it.y * scale];
     const b = markBox(it) * scale; return [it.x * scale - b / 2, it.y * scale - b / 2];
   }
 
@@ -93,7 +94,8 @@
     sign: 'Click where your signature should go. Press S to change it.',
     check: 'Click the middle of a box to tick it.',
     cross: 'Click the middle of a box to put an X in it.',
-    select: 'Select text to copy it (Ctrl+C), or drag items to move them. Double-click your text to edit.'
+    select: 'Select text to copy it (Ctrl+C), or drag items to move them. Double-click your text to edit.',
+    redact: 'Drag a box over text to black it out. The text under it is deleted from the saved PDF. F = find & redact.'
   };
   function setTool(t) {                        // user-facing: the Sign tool opens the dialog first
     if (t === 'sign' && (!sig || tool === 'sign')) { openSignDialog(); return; }
@@ -113,12 +115,14 @@
   function setSize(s) { size = clamp(Math.round(s), MIN_SIZE, MAX_SIZE); showSize(); }
   function adjustSize(d) {
     const it = itemById(selected);
+    if (it && it.type === 'redact') return;
     if (it && it.type === 'sign') { const s = clamp(it.size + d * 2, SIG_MIN, SIG_MAX); changeSelected({ size: s }); $('sizeOut').textContent = s; return; }
     if (!it && tool === 'sign') { signSize = clamp(signSize + d * 2, SIG_MIN, SIG_MAX); showSize(); return; }
     setSize(size + d); if (it) changeSelected({ size });
   }
   function setBold(b) { bold = !!b; $('boldBtn').setAttribute('aria-pressed', bold); }
   function syncControlsTo(it) {
+    if (it.type === 'redact') return;
     setColor(it.color);
     if (it.type === 'sign') { $('sizeOut').textContent = it.size; return; }
     setSize(it.size); if (it.type === 'text') setBold(it.bold);
@@ -163,7 +167,7 @@
     items = []; history = []; selected = null; nextId = 1; dirty = false; curPage = 1;
     $('undo').disabled = true; $('del').disabled = true;
     document.body.classList.add('loaded'); $('toolbar').hidden = false;
-    ['save', 'saveWork', 'loadWorkBtn', 'addBtn2'].forEach(i => { $(i).disabled = false; });
+    ['save', 'saveWork', 'loadWorkBtn', 'addBtn2', 'findBtn'].forEach(i => { $(i).disabled = false; });
     pages = models; renumber(); rebuildDom(); updateFileLabel();
     stage.scrollTo(0, 0); activateTool('text');
     if (pages.some(p => p.rot)) toast('Some pages are rotated. Placing items on rotated pages is not supported.', true);
@@ -392,13 +396,16 @@
   }
   function addEl(p, it) {
     const el = document.createElement('div');
-    el.className = 'item ' + (it.type === 'text' ? 'text' : it.type === 'sign' ? 'sign' : 'mark') + (it.bold ? ' bold' : '') + (it.id === selected ? ' sel' : '');
+    el.className = 'item ' + (it.type === 'text' ? 'text' : it.type === 'sign' ? 'sign' : it.type === 'redact' ? 'redact' : 'mark') + (it.bold ? ' bold' : '') + (it.id === selected ? ' sel' : '');
     el.dataset.id = it.id;
     if (it.type === 'text') {
       el.style.fontSize = it.size * scale + 'px'; el.style.color = CSS_COLOR[it.color] || '#000';
       el.textContent = it.text;
     } else if (it.type === 'sign') {
       el.appendChild(sigEl(it, scale));
+    } else if (it.type === 'redact') {
+      el.style.width = it.w * scale + 'px'; el.style.height = it.h * scale + 'px'; el.title = 'Redaction';
+      const h = document.createElement('span'); h.className = 'rh'; el.appendChild(h);
     } else {
       el.appendChild(markSVG(it.type, markBox(it) * scale, it.color));
     }
@@ -466,9 +473,10 @@
       if (ae && ae.isContentEditable && !ae.contains(e.target)) ae.blur();   // commit pending text first
       const target = e.target.closest('.item');
       if (target && target.isContentEditable) return;
-      if (target) { startDrag(e, p, target); return; }
+      if (target) { if (e.target.classList.contains('rh')) startResize(e, p, target); else startDrag(e, p, target); return; }
       if (p.rot) { toast('This page is rotated; placing items here is not supported.', true); return; }
       if (tool === 'select') { select(null); return; }
+      if (tool === 'redact') { startRedactBox(e, p); return; }
       if (tool === 'sign' && !sig) { openSignDialog(); return; }
       const r = L.getBoundingClientRect();
       const x = (e.clientX - r.left) / scale, y = (e.clientY - r.top) / scale;
@@ -507,6 +515,118 @@
     e.preventDefault();
   }
 
+  /* ---------- redaction boxes ---------- */
+  function startRedactBox(e, p) {
+    const r = p.layer.getBoundingClientRect(), sx = (e.clientX - r.left) / scale, sy = (e.clientY - r.top) / scale;
+    const band = document.createElement('div'); band.className = 'rband'; p.layer.appendChild(band);
+    let box = null;
+    const move = ev => {
+      const x = clamp((ev.clientX - r.left) / scale, 0, p.w), y = clamp((ev.clientY - r.top) / scale, 0, p.h);
+      box = { x: Math.min(sx, x), y: Math.min(sy, y), w: Math.abs(x - sx), h: Math.abs(y - sy) };
+      Object.assign(band.style, { left: box.x * scale + 'px', top: box.y * scale + 'px', width: box.w * scale + 'px', height: box.h * scale + 'px' });
+    };
+    const up = () => {
+      removeEventListener('pointermove', move); removeEventListener('pointerup', up); removeEventListener('pointercancel', up);
+      band.remove();
+      if (!box || box.w * scale < 4 || box.h * scale < 4) { hint('Drag across the text you want to hide.'); return; }
+      pushHistory();
+      const it = { id: nextId++, page: p.n, type: 'redact', ...box, size: 0, color: 'black', text: '' };
+      items.push(it); redraw(p.n); select(it.id);
+    };
+    addEventListener('pointermove', move); addEventListener('pointerup', up); addEventListener('pointercancel', up);
+    e.preventDefault();
+  }
+  function startResize(e, p, target) {
+    const it = itemById(+target.dataset.id); select(it.id);
+    const sx = e.clientX, sy = e.clientY, ow = it.w, oh = it.h; let moved = false;
+    const move = ev => {
+      if (!moved) { pushHistory(); moved = true; }
+      it.w = clamp(ow + (ev.clientX - sx) / scale, 2, p.w - it.x); it.h = clamp(oh + (ev.clientY - sy) / scale, 2, p.h - it.y);
+      target.style.width = it.w * scale + 'px'; target.style.height = it.h * scale + 'px';
+    };
+    const up = () => { removeEventListener('pointermove', move); removeEventListener('pointerup', up); removeEventListener('pointercancel', up); };
+    addEventListener('pointermove', move); addEventListener('pointerup', up); addEventListener('pointercancel', up);
+    e.preventDefault(); e.stopPropagation();
+  }
+
+  /* ---------- find & redact ---------- */
+  const SKIP = /[\s\-\u2010-\u2015.]/;                     // ignored when matching, so 123-456-789 = 123 456 789
+  const measureCtx = document.createElement('canvas').getContext('2d');
+  function pageText(p) {
+    if (!p.textInfo) p.textInfo = p.page.getTextContent().then(tc => tc.items.filter(i => i.str !== undefined));
+    return p.textInfo;
+  }
+  async function findMatches(query) {               // -> [{page, x, y, w, h}] in page units (top-left origin)
+    const q = [...query.toLowerCase()].filter(ch => !SKIP.test(ch)).join('');
+    if (q.length < 2) return [];
+    const out = [];
+    for (const p of pages) {
+      const its = await pageText(p), vp = p.page.getViewport({ scale: 1 });
+      let norm = ''; const map = [];                // map[k] = [item index, char index] for each normalised char
+      its.forEach((it, ii) => [...it.str].forEach((ch, ci) => {
+        if (SKIP.test(ch)) return;
+        const low = ch.toLowerCase(); for (const c of low) { norm += c; map.push([ii, ci]); }
+      }));
+      for (let at = norm.indexOf(q); at >= 0; at = norm.indexOf(q, at + q.length)) {
+        const spans = new Map();                    // item -> [first char, last char]
+        for (let k = at; k < at + q.length; k++) {
+          const [ii, ci] = map[k], s = spans.get(ii);
+          spans.set(ii, s ? [Math.min(s[0], ci), Math.max(s[1], ci)] : [ci, ci]);
+        }
+        spans.forEach(([a, b], ii) => { const r = charBox(its[ii], a, b, vp); if (r) out.push({ page: p.n, ...r }); });
+      }
+    }
+    return out;
+  }
+  function charBox(it, a, b, vp) {                  // box around characters a..b of a text item, padded
+    const t = it.transform, chars = [...it.str], fh = Math.hypot(t[2], t[3]) || it.height || 10;
+    let x0, x1, y0, y1;
+    if (Math.abs(t[1]) < 1e-3 && Math.abs(t[2]) < 1e-3) {
+      measureCtx.font = '100px Helvetica, Arial, sans-serif';
+      const full = measureCtx.measureText(it.str).width || 1;
+      const f0 = measureCtx.measureText(chars.slice(0, a).join('')).width / full;
+      const f1 = measureCtx.measureText(chars.slice(0, b + 1).join('')).width / full;
+      const pad = fh * 0.08;
+      x0 = t[4] + it.width * f0 - pad; x1 = t[4] + it.width * f1 + pad;
+      y0 = t[5] - fh * 0.3; y1 = t[5] + fh * 1.0;
+    } else { x0 = t[4]; x1 = t[4] + it.width + fh * 0.2; y0 = t[5] - fh * 0.3; y1 = t[5] + fh * 1.0; }   // rotated text: whole run
+    const [ax, ay] = vp.convertToViewportPoint(x0, y0), [bx, by] = vp.convertToViewportPoint(x1, y1);
+    const x = Math.min(ax, bx), y = Math.min(ay, by), w = Math.abs(bx - ax), h = Math.abs(by - ay);
+    return w > 0 && h > 0 ? { x, y, w, h } : null;
+  }
+  let findTimer, findResults = [], findSeq = 0;
+  function openFind() {
+    if (!hasDoc()) { toast('Open a PDF first.', true); return; }
+    $('moreMenu').open = false; $('findMsg').textContent = 'Type the text to find, e.g. your SIN.'; $('findGo').disabled = true;
+    $('findDialog').showModal(); $('findInput').focus(); $('findInput').select();
+    if ($('findInput').value) runFind();
+  }
+  async function runFind() {
+    const seq = ++findSeq, q = $('findInput').value;
+    findResults = await findMatches(q);
+    if (seq !== findSeq) return;
+    const pagesHit = new Set(findResults.map(r => r.page)).size;
+    $('findGo').disabled = !findResults.length;
+    $('findMsg').textContent = q.trim().length < 2 ? 'Type the text to find, e.g. your SIN.'
+      : findResults.length ? `Found on ${pagesHit} page${pagesHit === 1 ? '' : 's'} (${findResults.length} box${findResults.length === 1 ? '' : 'es'}).`
+        : 'Not found. Scanned pages (pictures of text) cannot be searched; draw a box instead.';
+  }
+  function applyFind() {
+    if (!findResults.length) return;
+    pushHistory();
+    const touched = new Set();
+    findResults.forEach(r => { items.push({ id: nextId++, type: 'redact', size: 0, color: 'black', text: '', ...r }); touched.add(r.page); });
+    touched.forEach(redraw); $('findDialog').close();
+    if (tool !== 'redact') activateTool('redact');
+    const first = Math.min(...touched); pages[first - 1].el.scrollIntoView({ block: 'start', behavior: 'smooth' });
+    toast(`Added ${findResults.length} redaction${findResults.length === 1 ? '' : 's'}. Check them, then Save PDF.`);
+  }
+  $('findInput').addEventListener('input', () => { clearTimeout(findTimer); findTimer = setTimeout(runFind, 200); });
+  $('findInput').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); clearTimeout(findTimer); runFind().then(applyFind); } });
+  $('findGo').onclick = applyFind;
+  $('findCancel').onclick = () => $('findDialog').close();
+  $('findBtn').onclick = openFind;
+
   /* ---------- delete / undo / nudge ---------- */
   function deleteSel() {
     if (selected == null) return;
@@ -543,9 +663,14 @@
     if (!Array.isArray(arr)) throw new Error('bad');
     const out = [];
     for (const i of arr.slice(0, 5000)) {
-      if (!i || !['text', 'check', 'cross', 'sign'].includes(i.type)) continue;
+      if (!i || !['text', 'check', 'cross', 'sign', 'redact'].includes(i.type)) continue;
       const page = Math.floor(+i.page);
       if (!(page >= 1 && page <= pages.length)) continue;
+      if (i.type === 'redact') {
+        const x = +i.x, y = +i.y, w = +i.w, h = +i.h;
+        if ([x, y, w, h].every(Number.isFinite) && w > 0 && h > 0) out.push({ id: out.length + 1, page, type: 'redact', x, y, w, h, size: 0, color: 'black', text: '' });
+        continue;
+      }
       const x = +i.x, y = +i.y, sz = +i.size;
       if (![x, y, sz].every(Number.isFinite)) continue;
       if (i.type === 'sign' && (!SIG_FONTS.includes(i.font) || !String(i.text ?? '').trim())) continue;
@@ -564,10 +689,28 @@
     const { PDFDocument, StandardFonts, rgb, LineCapStyle } = PDFLib;
     const btn = $('save'); btn.disabled = true; btn.textContent = 'Saving…';
     try {
-      const merged = !(sources.length === 1 && pages.length === sources[0].doc.numPages && pages.every((p, i) => p.idx === i));
+      // Redactions need the rebuild path: it only copies objects the (rewritten) pages still use,
+      // so the original text, document metadata, bookmarks and form data are not carried over.
+      const redRects = new Map();                     // page model -> [[x0,y0,x1,y1] in PDF user space]
+      for (const it of items) {
+        if (it.type !== 'redact') continue;
+        const p = pages[it.page - 1]; if (!p) continue;
+        const vp = p.page.getViewport({ scale: 1 });
+        const [ax, ay] = vp.convertToPdfPoint(it.x, it.y), [bx, by] = vp.convertToPdfPoint(it.x + it.w, it.y + it.h);
+        if (!redRects.has(p)) redRects.set(p, []);
+        redRects.get(p).push([Math.min(ax, bx), Math.min(ay, by), Math.max(ax, bx), Math.max(ay, by)]);
+      }
+      const redacting = redRects.size > 0, red = { glyphs: 0, images: 0, annots: 0 };
+      const merged = redacting || !(sources.length === 1 && pages.length === sources[0].doc.numPages && pages.every((p, i) => p.idx === i));
       const load = async s => {
         const d = await PDFDocument.load(s.bytes, { ignoreEncryption: true });
         if (d.isEncrypted) throw new Error('ENCRYPTED');
+        for (const p of pages) {                       // redact every page of this source before copying any of them
+          if (p.src !== s || !redRects.has(p)) continue;
+          let r;
+          try { r = Redactor.redactPage(d, d.getPage(p.idx), redRects.get(p)); } catch (e) { console.error(e); throw new Error('REDACT:' + p.n); }
+          red.glyphs += r.glyphs; red.images += r.images; red.annots += r.annots;
+        }
         return d;
       };
       let doc;
@@ -588,6 +731,7 @@
       for (const it of items) {
         const pg = pgs[it.page - 1]; if (!pg) continue;
         const H = pg.getHeight(), col = rgb(...(COLORS[it.color] || COLORS.black));
+        if (it.type === 'redact') continue;
         if (it.type === 'sign') {
           const c = sigImage(it);
           if (!sigImgs.has(c.url)) sigImgs.set(c.url, await doc.embedPng(c.url));
@@ -605,15 +749,23 @@
           else { seg([1.5, 1.5], [8.5, 8.5]); seg([8.5, 1.5], [1.5, 8.5]); }
         }
       }
+      redRects.forEach((rs, p) => {                    // black boxes last, so they also cover anything drawn above
+        const pg = pgs[p.n - 1];
+        rs.forEach(r => pg.drawRectangle({ x: r[0], y: r[1], width: r[2] - r[0], height: r[3] - r[1], color: rgb(0, 0, 0) }));
+      });
       const out = await doc.save();
-      download(new Blob([out], { type: 'application/pdf' }), baseName() + (merged ? '-combined' : '-filled') + '.pdf');
+      download(new Blob([out], { type: 'application/pdf' }), baseName() + (redacting ? '-redacted' : merged ? '-combined' : '-filled') + '.pdf');
       dirty = false;
-      toast(replaced ? 'Saved. Some characters are not supported by the PDF font and were replaced with “?”.' : 'Saved to your Downloads folder. The original file was not changed.', replaced);
+      if (red.images) toast('Saved, but a redaction box covers an image (for example a scanned page). The box hides it, but the picture underneath was not changed. Do not rely on it for scans.', true);
+      else if (redacting) toast(`Saved. Removed ${red.glyphs} character${red.glyphs === 1 ? '' : 's'}${red.annots ? ` and ${red.annots} form field${red.annots === 1 ? '' : 's'}/note${red.annots === 1 ? '' : 's'}` : ''} under the black boxes.`, replaced);
+      else toast(replaced ? 'Saved. Some characters are not supported by the PDF font and were replaced with “?”.' : 'Saved to your Downloads folder. The original file was not changed.', replaced);
     } catch (e) {
       console.error(e);
-      toast(e && e.message === 'ENCRYPTED'
+      const m = e && e.message || '';
+      toast(m === 'ENCRYPTED'
         ? 'One of these PDFs is encrypted (restricted), so it cannot be saved here. Print it to a new PDF first (Print → Save as PDF), then open that copy.'
-        : 'Could not save this PDF.', true);
+        : m.startsWith('REDACT:') ? `Could not safely redact page ${m.slice(7)}, so nothing was saved.`
+          : 'Could not save this PDF.', true);
     } finally { btn.disabled = false; btn.textContent = 'Save PDF'; }
   }
 
@@ -697,7 +849,7 @@
   addEventListener('keydown', e => {
     const ae = document.activeElement;
     if (ae && (ae.isContentEditable || ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA')) return;
-    if ($('shortcuts').open || $('signDialog').open || $('dropDialog').open) return;
+    if ($('shortcuts').open || $('signDialog').open || $('dropDialog').open || $('findDialog').open) return;
     const mod = e.ctrlKey || e.metaKey, k = e.key.toLowerCase();
     if (mod && k === 'z') { e.preventDefault(); undo(); return; }
     if (mod && k === 's') { e.preventDefault(); savePdf(); return; }
@@ -710,7 +862,8 @@
       const d = { ArrowLeft: [-st, 0], ArrowRight: [st, 0], ArrowUp: [0, -st], ArrowDown: [0, st] }[e.key];
       if (d) { e.preventDefault(); nudge(...d); } return;
     }
-    const t = { t: 'text', c: 'check', x: 'cross', s: 'sign', v: 'select' }[k]; if (t) setTool(t);
+    if (k === 'f') { e.preventDefault(); openFind(); return; }
+    const t = { t: 'text', c: 'check', x: 'cross', s: 'sign', v: 'select', r: 'redact' }[k]; if (t) setTool(t);
   });
 
   // drag & drop PDF files
