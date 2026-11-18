@@ -23,7 +23,7 @@ jobs:
       - name: Stage site files
         run: |
           mkdir -p dist
-          cp -r index.html app.js redact.js styles.css favicon.svg _headers lib fonts dist/
+          cp -r index.html app.js decrypt.js redact.js styles.css favicon.svg _headers lib fonts dist/
 
       - name: Check Cloudflare token
         env:

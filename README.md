@@ -25,6 +25,6 @@ Security headers (CSP etc.) are in `_headers`.
 ## Notes
 - Redaction (`redact.js`) is real: the glyphs under each box are deleted from the page's content stream (and from form XObjects it draws), with a spacing adjustment so the rest of the line keeps its position and stays selectable text. Form fields, comments and links overlapping a box are removed. The saved file is rebuilt from the pages, so the old content, metadata, bookmarks and the interactive form are not carried over.
 - Redaction limits: images (scans) under a box are covered but not altered, and the app warns when that happens. Text drawn as vector outlines is not detected. If a form XObject (e.g. a repeated header) is redacted, the same text disappears wherever else it is drawn.
-- Combining: encrypted (restricted) PDFs can be viewed but not saved or combined; print them to a new PDF first.
+- Encrypted PDFs (`decrypt.js`): restricted or password-protected files (RC4, AES-128, AES-256) are decrypted in the browser when saving, and the saved copy has no encryption or restrictions. The open password is asked for once when the file is opened. Certificate-based (public key) encryption is not supported.
 - pdf.js runs with `isEvalSupported:false` (mitigates CVE-2024-4367). Upgrade to >= 4.2.67 when convenient.
 - Plain PDFs only (not XFA), unrotated pages, standard Helvetica text (WinAnsi characters).

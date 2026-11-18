@@ -14,7 +14,7 @@
   const SIG_MIN = 8, SIG_MAX = 100, SIG_K = 4;       // SIG_K = render scale for crisp signatures
 
   /* ---------- state ---------- */
-  let sources = [], nextSrc = 1, fileName = 'form.pdf';   // sources: {id, name, bytes, doc}
+  let sources = [], nextSrc = 1, fileName = 'form.pdf';   // sources: {id, name, bytes, doc, password}
   let pages = [];                 // {n, el, canvas, layer, ghost, w, h, rot, page, src, idx, task, rendered}
   let items = [];                 // {id, page, type, x, y, size, color, text}
   let tool = 'text', color = 'black', size = 10, bold = false;
@@ -134,14 +134,22 @@
   }
 
   /* ---------- opening & combining PDFs ---------- */
-  async function readPdf(file) {                       // -> source {id,name,bytes,doc} or null (toasts why)
+  async function readPdf(file) {                       // -> source {id,name,bytes,doc,password} or null (toasts why)
     if (file.size > MAX_BYTES) { toast(`${file.name}: too large (limit 150 MB).`, true); return null; }
     let bytes;
     try { bytes = new Uint8Array(await file.arrayBuffer()); } catch { toast('Could not read ' + file.name + '.', true); return null; }
     if (String.fromCharCode(...bytes.slice(0, 5)) !== '%PDF-') { toast(file.name + ' does not look like a PDF file.', true); return null; }
     try {
-      const doc = await pdfjs.getDocument({ data: bytes.slice(), isEvalSupported: false, enableXfa: false }).promise;
-      return { id: nextSrc++, name: file.name || 'document.pdf', bytes, doc };
+      const task = pdfjs.getDocument({ data: bytes.slice(), isEvalSupported: false, enableXfa: false });
+      let password = '';
+      task.onPassword = (update, reason) => {         // kept so the file can be decrypted when saving
+        const pw = prompt(reason === pdfjs.PasswordResponses.INCORRECT_PASSWORD
+          ? 'Wrong password. Try again:' : file.name + ' is password-protected. Enter its password:');
+        if (pw === null) { task.destroy(); return; }
+        update(password = pw);
+      };
+      const doc = await task.promise;
+      return { id: nextSrc++, name: file.name || 'document.pdf', bytes, doc, password };
     } catch (e) {
       toast(e && e.name === 'PasswordException' ? file.name + ' is password-protected and cannot be opened.' : 'Could not open ' + file.name + '.', true);
       return null;
@@ -703,8 +711,9 @@
       const redacting = redRects.size > 0, red = { glyphs: 0, images: 0, annots: 0 };
       const merged = redacting || !(sources.length === 1 && pages.length === sources[0].doc.numPages && pages.every((p, i) => p.idx === i));
       const load = async s => {
-        const d = await PDFDocument.load(s.bytes, { ignoreEncryption: true });
-        if (d.isEncrypted) throw new Error('ENCRYPTED');
+        let d = null;                                  // encrypted files can fail here (scrambled object streams)
+        try { d = await PDFDocument.load(s.bytes, { ignoreEncryption: true }); } catch (e) { console.warn(e); }
+        if (!d || d.isEncrypted) d = await PdfDecrypt.load(s.bytes, s.password);   // saved copy has no encryption
         for (const p of pages) {                       // redact every page of this source before copying any of them
           if (p.src !== s || !redRects.has(p)) continue;
           let r;
@@ -763,7 +772,8 @@
       console.error(e);
       const m = e && e.message || '';
       toast(m === 'ENCRYPTED'
-        ? 'One of these PDFs is encrypted (restricted), so it cannot be saved here. Print it to a new PDF first (Print → Save as PDF), then open that copy.'
+        ? 'One of these PDFs uses an encryption type that is not supported here. Print it to a new PDF first (Print → Save as PDF), then open that copy.'
+        : m === 'PASSWORD' ? 'Could not unlock one of these encrypted PDFs, so nothing was saved.'
         : m.startsWith('REDACT:') ? `Could not safely redact page ${m.slice(7)}, so nothing was saved.`
           : 'Could not save this PDF.', true);
     } finally { btn.disabled = false; btn.textContent = 'Save PDF'; }
