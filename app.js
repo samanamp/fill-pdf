@@ -1165,6 +1165,7 @@
     if (mod && k === 'z') { e.preventDefault(); undo(); return; }
     if (mod && k === 's') { e.preventDefault(); savePdf(); return; }
     if (mod && k === 'b' && hasDoc()) { e.preventDefault(); $('boldBtn').click(); return; }
+    if (!mod && !e.altKey && e.key === '?') { e.preventDefault(); $('shortcuts').showModal(); return; }
     if (mod || e.altKey || !hasDoc()) return;
     if (e.key === 'Delete' || e.key === 'Backspace') { if (selected != null) { e.preventDefault(); deleteSel(); } return; }
     if (e.key === 'Escape') { select(null); return; }

@@ -56,10 +56,10 @@ button { font: inherit; color: inherit; }
 .menu { position: relative; }
 .menu summary::-webkit-details-marker { display: none; }
 .menu-pop {
-  position: absolute; right: 0; top: calc(100% + 6px); z-index: 50; min-width: 230px; padding: 6px;
+  position: absolute; right: 0; top: calc(100% + 6px); z-index: 50; min-width: 260px; padding: 6px;
   background: var(--panel); border: 1px solid var(--line); border-radius: 10px; box-shadow: var(--shadow);
 }
-.menu-pop button { display: block; width: 100%; text-align: left; background: none; border: 0; border-radius: 6px; padding: 8px 10px; cursor: pointer; }
+.menu-pop button { display: flex; align-items: center; justify-content: space-between; gap: 12px; width: 100%; white-space: nowrap; text-align: left; background: none; border: 0; border-radius: 6px; padding: 8px 10px; cursor: pointer; }
 .menu-pop button:hover:not(:disabled) { background: var(--accent-soft); }
 .menu-pop button:disabled { opacity: .45; cursor: default; }
 .menu-pop hr { border: 0; border-top: 1px solid var(--line); margin: 5px 0; }
@@ -120,7 +120,7 @@ body.mode-select .textLayer { pointer-events: auto; user-select: text; -webkit-u
   font-family: Helvetica, Arial, sans-serif; line-height: 1.15; touch-action: none; }
 .item.text { min-width: 6px; min-height: 1em; }
 .item.bold { font-weight: 700; }
-.item.sel { outline: calc(1.5px * var(--inv, 1)) dashed var(--sel); outline-offset: calc(3px * var(--inv, 1)); }
+.item.sel { outline: calc(1.5px * var(--inv, 1)) dashed var(--accent); outline-offset: calc(3px * var(--inv, 1)); }
 .item[contenteditable="true"] { cursor: text; user-select: text; -webkit-user-select: text; outline: calc(1.5px * var(--inv, 1)) solid var(--accent); outline-offset: calc(3px * var(--inv, 1)); background: rgba(255,230,90,.35); touch-action: auto; }
 .item svg { display: block; overflow: visible; }
 .item.sign img, .ghost img { display: block; max-width: none; -webkit-user-drag: none; user-select: none; pointer-events: none; }
@@ -150,6 +150,8 @@ body.loaded #empty { display: none; }
 .points li { padding-left: 14px; position: relative; }
 .points li::before { content: ""; position: absolute; left: 0; top: .6em; width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
 .points b { color: var(--ink); }
+.fine { margin: 18px 0 0 !important; font-size: 12px; color: var(--muted); }
+body:not(.loaded) #save, body:not(.loaded) #moreMenu { display: none; }   /* nothing to save or do yet */
 
 /* ---------- floating toolbar ---------- */
 .toolbar {
@@ -172,7 +174,8 @@ body.loaded #empty { display: none; }
 .seg button svg .fill { fill: currentColor; stroke: none; }
 .seg button:hover { background: var(--panel2); color: var(--ink); }
 .seg button.on { background: var(--accent-soft); color: var(--accent); }
-.sq { width: 32px; height: 32px; display: grid; place-items: center; background: none; border: 0; border-radius: 8px; cursor: pointer; font-size: 17px; }
+.sq { width: 32px; height: 32px; display: grid; place-items: center; padding: 0; background: none; border: 0; border-radius: 8px; cursor: pointer; font-size: 17px; color: var(--ink); }
+.sq svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
 .sq:hover:not(:disabled) { background: var(--panel2); }
 .sq:disabled { opacity: .35; cursor: default; }
 .sq.bold { font-weight: 800; font-family: Georgia, serif; }
@@ -208,10 +211,15 @@ output { min-width: 26px; text-align: center; font-variant-numeric: tabular-nums
 dialog { border: 1px solid var(--line); border-radius: 14px; background: var(--panel); color: var(--ink); padding: 22px 24px; max-width: 420px; box-shadow: var(--shadow); }
 dialog::backdrop { background: rgba(0,0,0,.4); }
 dialog h2 { margin: 0 0 12px; font-size: 18px; }
-dl { display: grid; grid-template-columns: auto 1fr; gap: 6px 16px; margin: 0 0 16px; }
-dt { font-weight: 600; white-space: nowrap; }
-dd { margin: 0; color: var(--muted); }
-dialog form { text-align: right; }
+#shortcuts { width: min(560px, calc(100vw - 24px)); max-width: none; }
+.keys { display: grid; gap: 14px; margin-bottom: 18px; }
+.keys h3 { margin: 0 0 6px; font-size: 11.5px; font-weight: 650; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+dl { display: grid; grid-template-columns: 9.5em 1fr; gap: 7px 14px; margin: 0; align-items: baseline; }
+dt { white-space: nowrap; font-size: 13px; }
+dd { margin: 0; color: var(--muted); font-size: 13px; }
+kbd { display: inline-block; min-width: 1.6em; padding: 1px 5px; text-align: center; font: 600 11.5px/1.5 system-ui, sans-serif; color: var(--ink);
+  background: var(--panel2); border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 5px; }
+.menu-pop kbd { color: var(--muted); }
 
 /* ---------- small screens ---------- */
 @media (max-width: 860px) {
@@ -223,13 +231,17 @@ dialog form { text-align: right; }
 }
 @media (max-width: 520px) {
   .zoomgrp, .zoomdiv, .toolbar .div { display: none; }
-  .seg button { min-width: 31px; padding: 6px 2px; }
+  .seg button { min-width: 36px; padding: 7px 4px; }
   .seg button span { display: none; }
-  .toolbar { gap: 4px; padding: 5px 5px; }
+  /* two rows, so every control stays reachable without sideways scrolling */
+  .toolbar { gap: 2px 6px; padding: 5px 6px; flex-wrap: wrap; justify-content: center; width: auto; overflow: visible; }
+  .seg { flex-basis: 100%; justify-content: space-between; }
+  #stage > .toolbar { margin-top: -104px; }
   .sq { width: 28px; }
   .sw { width: 26px; height: 26px; }
-  .brand span { display: none; }
+  body.loaded .brand span { display: none; }
 }
+@media (hover: none) and (pointer: coarse) { .drop-hint { display: none; } .drop-card h1 { margin-bottom: 16px; } }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
 @media print { body > *:not(#pages) { display: none; } }
 
@@ -244,5 +256,14 @@ dialog form { text-align: right; }
 .sigtxt { display: block; font-size: 36px; line-height: 1.5; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .sigopt small { display: block; color: #667085; font: 11px system-ui, sans-serif; }
 .note { margin: 0 0 14px; color: var(--muted); font-size: 13px; }
-.dlg-actions { display: flex; justify-content: flex-end; gap: 8px; }
-@media (max-width: 520px) { .sigopts { grid-template-columns: 1fr; } }
+.dlg-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }
+#findMsg { color: var(--ink); font-weight: 550; }
+@media (max-width: 520px) {
+  /* keep all six styles and the buttons on one phone screen */
+  dialog { padding: 18px 16px; }
+  .sigopts { gap: 8px; }
+  .sigopt { padding: 4px 8px 4px; }
+  .sigtxt { font-size: 24px; }
+  #signDialog .note { font-size: 12px; }
+  .fld input { font-size: 16px; padding: 8px 10px; }
+}
