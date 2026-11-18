@@ -217,7 +217,7 @@ const PdfDecrypt = (() => {
   };
 
   async function load(bytes, password = '') {
-    const parser = PDFParser.forBytesWithOptions(bytes, 100, false, false);
+    const parser = PDFParser.forBytesWithOptions(bytes, Infinity, false, false);
     const ctx = parser.context, order = new Map(), objStms = [];
     let seq = 0, lastRef = null;
     const header = parser.parseIndirectObjectHeader;

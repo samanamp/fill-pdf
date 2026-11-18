@@ -28,4 +28,7 @@ Security headers (CSP etc.) are in `_headers`.
 - Encrypted PDFs (`decrypt.js`): restricted or password-protected files (RC4, AES-128, AES-256) are decrypted in the browser when saving, and the saved copy has no encryption or restrictions. The open password is asked for once when the file is opened. Certificate-based (public key) encryption is not supported.
 - pdf.js runs with `isEvalSupported:false` (mitigates CVE-2024-4367). Upgrade to >= 4.2.67 when convenient.
 - Page rotation: items are stored in the page's unrotated coordinates with the angle they were placed at, so they turn with the page (like ink on paper), and new items are always upright on screen.
-- Plain PDFs only (not XFA), standard Helvetica text (WinAnsi characters).
+- Form fields: pdf.js draws the PDF's own fields as real inputs (`AnnotationLayer`), and `saveDocument()` writes the values with their appearance before pdf-lib adds the overlays. Field scripts (calculations, formatting) are not run. Values are kept in progress files.
+- Text: plain Latin text uses Helvetica (no font embedded). Other text embeds a subset of Noto Sans (Latin, Greek, Cyrillic, Vietnamese) or Vazirmatn (Persian, Arabic; shaped by fontkit, with a simplified Unicode bidi for mixed lines). Any other script (Chinese, Hebrew, emoji, …) is saved as a sharp image of the text. fontkit and the font files are loaded only when needed.
+- Rendering: pages are drawn one at a time, nearest to the view first; pages far from the view release their pictures, and canvases are capped at 16 MP. Zooming changes one transform per page and re-renders only what is on screen. Thumbnails reuse the page picture when there is one. Saving parses and writes at full speed (no yielding).
+- Plain PDFs only (not XFA).

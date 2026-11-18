@@ -4,6 +4,11 @@
 @font-face { font-family: "Nothing You Could Do"; src: url("fonts/nothing-you-could-do.woff2") format("woff2"); font-weight: 400; font-style: normal; font-display: swap; }
 @font-face { font-family: "Zeyada"; src: url("fonts/zeyada.woff2") format("woff2"); font-weight: 400; font-style: normal; font-display: swap; }
 @font-face { font-family: "Dawning of a New Day"; src: url("fonts/dawning-of-a-new-day.woff2") format("woff2"); font-weight: 400; font-style: normal; font-display: swap; }
+/* text fonts for characters Helvetica lacks; fetched only when such text is on the page */
+@font-face { font-family: "Noto Sans"; src: url("fonts/NotoSans-Regular.ttf") format("truetype"); font-weight: 400; font-display: block; }
+@font-face { font-family: "Noto Sans"; src: url("fonts/NotoSans-Bold.ttf") format("truetype"); font-weight: 700; font-display: block; }
+@font-face { font-family: "Vazirmatn"; src: url("fonts/Vazirmatn-Regular.ttf") format("truetype"); font-weight: 400; font-display: block; }
+@font-face { font-family: "Vazirmatn"; src: url("fonts/Vazirmatn-Bold.ttf") format("truetype"); font-weight: 700; font-display: block; }
 :root {
   --bg: #eef0f4; --panel: #ffffff; --panel2: #f6f7f9; --ink: #1b2130; --muted: #646d7e;
   --line: #d9dde5; --accent: #2457d6; --accent-ink: #fff; --accent-soft: #e6edff;
@@ -95,7 +100,9 @@ body.loaded #thumbs { display: block; }
 #pages { display: flex; flex-direction: column; align-items: center; gap: 18px; padding: 22px 22px 120px; width: max-content; min-width: 100%; }
 .page { position: relative; flex: none; background: #fff; box-shadow: var(--shadow); }
 .page canvas { display: block; width: 100%; height: 100%; }
-.layer { position: absolute; left: 0; top: 0; transform-origin: 0 0; touch-action: pan-y pan-x; }
+.layer { position: absolute; left: 0; top: 0; z-index: 4; transform-origin: 0 0; touch-action: pan-y pan-x; }
+.layer.pass { pointer-events: none; }                 /* pointer is over a form field */
+.layer.pass .item { pointer-events: auto; }
 .layer.tool-text { cursor: text; }
 .layer.tool-check, .layer.tool-cross { cursor: crosshair; }
 .layer.tool-select { cursor: default; pointer-events: none; }
@@ -107,24 +114,24 @@ body.loaded #thumbs { display: block; }
 .textLayer span, .textLayer br { color: transparent; position: absolute; white-space: pre; cursor: text; transform-origin: 0% 0%; }
 .textLayer ::selection { background: rgba(36, 87, 214, .35); color: transparent; }
 body.mode-select .textLayer { pointer-events: auto; user-select: text; -webkit-user-select: text; }
-.page .num { position: absolute; left: 50%; bottom: -17px; transform: translateX(-50%); font-size: 11px; color: var(--muted); pointer-events: none; }
+.page .num { z-index: 1; position: absolute; left: 50%; bottom: -17px; transform: translateX(-50%); font-size: 11px; color: var(--muted); pointer-events: none; }
 
 .item { position: absolute; user-select: none; -webkit-user-select: none; cursor: move; white-space: pre;
-  font-family: Helvetica, Arial, sans-serif; line-height: 1; touch-action: none; }
+  font-family: Helvetica, Arial, sans-serif; line-height: 1.15; touch-action: none; }
 .item.text { min-width: 6px; min-height: 1em; }
 .item.bold { font-weight: 700; }
-.item.sel { outline: 1.5px dashed var(--sel); outline-offset: 3px; }
-.item[contenteditable="true"] { cursor: text; user-select: text; -webkit-user-select: text; outline: 1.5px solid var(--accent); outline-offset: 3px; background: rgba(255,230,90,.35); touch-action: auto; }
+.item.sel { outline: calc(1.5px * var(--inv, 1)) dashed var(--sel); outline-offset: calc(3px * var(--inv, 1)); }
+.item[contenteditable="true"] { cursor: text; user-select: text; -webkit-user-select: text; outline: calc(1.5px * var(--inv, 1)) solid var(--accent); outline-offset: calc(3px * var(--inv, 1)); background: rgba(255,230,90,.35); touch-action: auto; }
 .item svg { display: block; overflow: visible; }
 .item.sign img, .ghost img { display: block; max-width: none; -webkit-user-drag: none; user-select: none; pointer-events: none; }
-.ghost { position: absolute; pointer-events: none; opacity: .4; display: none; }
+.ghost { position: absolute; left: 0; top: 0; z-index: 5; pointer-events: none; opacity: .4; display: none; will-change: transform; }
 /* redaction boxes: black on screen exactly as in the saved PDF */
 .layer.tool-redact { cursor: crosshair; }
 .item.redact { background: #000; }
-.item.redact .rh { position: absolute; right: -5px; bottom: -5px; width: 10px; height: 10px; border-radius: 2px;
-  background: var(--sel); border: 1.5px solid #fff; cursor: nwse-resize; display: none; }
+.item.redact .rh { position: absolute; right: calc(-5px * var(--inv, 1)); bottom: calc(-5px * var(--inv, 1)); width: calc(10px * var(--inv, 1)); height: calc(10px * var(--inv, 1)); border-radius: calc(2px * var(--inv, 1));
+  background: var(--sel); border: calc(1.5px * var(--inv, 1)) solid #fff; cursor: nwse-resize; display: none; }
 .item.redact.sel .rh { display: block; }
-.rband { position: absolute; background: rgba(0,0,0,.55); outline: 1.5px dashed var(--sel); pointer-events: none; }
+.rband { position: absolute; background: rgba(0,0,0,.55); outline: calc(1.5px * var(--inv, 1)) dashed var(--sel); pointer-events: none; }
 
 /* ---------- empty state ---------- */
 #empty { position: absolute; inset: 0; display: grid; place-items: center; padding: 20px; overflow: auto; }

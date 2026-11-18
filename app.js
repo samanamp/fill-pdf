@@ -18,7 +18,7 @@
   // Page sizes (w, h) and item positions are in the page's unrotated space (rotation 0, top-left origin, PDF units).
   // rot = how the page is shown (0/90/180/270, clockwise); items turn with their page. ang = page rotation when an
   // item was placed, so it reads upright then.
-  let pages = [];                 // {n, el, canvas, layer, ghost, w, h, rot, page, src, idx, task, rendered}
+  let pages = [];                 // {n, el, canvas, textEl, annEl, layer, ghost, w, h, rot, page, src, idx, task, drawn, thumb…}
   let items = [];                 // {id, page, type, x, y, size, color, text, ang}
   let tool = 'text', color = 'black', size = 10, bold = false;
   let sig = null, signSize = 28, lastName = '';   // sig = {text, font} chosen in the dialog
@@ -89,11 +89,11 @@
     img.style.width = c.w * px + 'px'; img.style.height = c.h * px + 'px'; return img;
   }
   // top-left of an item's element, in CSS px
+  // top-left of an item's element, in layer units (page units x U)
   function originOf(it) {
-    if (it.type === 'text') return [it.x * scale, it.y * scale];
-    if (it.type === 'sign') { const c = sigImage(it); return [(it.x - c.w / 2) * scale, (it.y - c.h / 2) * scale]; }
-    if (it.type === 'redact') return [it.x * scale, it.y * scale];
-    const b = markBox(it) * scale; return [it.x * scale - b / 2, it.y * scale - b / 2];
+    if (it.type === 'sign') { const c = sigImage(it); return [(it.x - c.w / 2) * U, (it.y - c.h / 2) * U]; }
+    if (it.type === 'mark' || it.type === 'check' || it.type === 'cross') { const b = markBox(it); return [(it.x - b / 2) * U, (it.y - b / 2) * U]; }
+    return [it.x * U, it.y * U];
   }
 
   function pushHistory() {
@@ -118,7 +118,9 @@
     tool = t; showSize(); document.body.classList.toggle('mode-select', t === 'select');
     document.querySelectorAll('#tools button').forEach(b => b.classList.toggle('on', b.dataset.tool === t));
     pages.forEach(p => { p.layer.className = 'layer tool-' + t; p.ghost.style.display = 'none'; });
+    passL = null; removeEventListener('pointermove', unpass);
     hint(HINTS[t]);
+    if (t === 'select') pump();                        // builds the selectable text of the pages in view
   }
   function setColor(c) {
     color = c;
@@ -168,13 +170,12 @@
       return null;
     }
   }
-  async function modelsFor(src) {                      // one page model per page of the source
-    const out = [];
-    for (let i = 0; i < src.doc.numPages; i++) {
-      const page = await src.doc.getPage(i + 1), vp = page.getViewport({ scale: 1, rotation: 0 });
-      out.push({ n: 0, w: vp.width, h: vp.height, rot: ((page.rotate % 360) + 360) % 360, page, src, idx: i, task: null, rendered: 0 });
-    }
-    return out;
+  async function modelsFor(src) {                      // one page model per page of the source (fetched in parallel)
+    const all = await Promise.all(Array.from({ length: src.doc.numPages }, (_, i) => src.doc.getPage(i + 1)));
+    return all.map((page, i) => {
+      const vp = page.getViewport({ scale: 1, rotation: 0 }), rot = ((page.rotate % 360) + 360) % 360;
+      return { n: 0, w: vp.width, h: vp.height, rot, page, src, idx: i, task: null, drawn: null };
+    });
   }
 
   async function openPdf(file) {                       // replaces the current document
@@ -184,6 +185,7 @@
     const src = await readPdf(file); if (!src) return;
     const models = await modelsFor(src);
     if (token !== loadToken) { src.doc.destroy(); return; }
+    pages.forEach(dropPage);
     sources.forEach(s => s.doc.destroy()); sources = [src]; fileName = src.name;
     items = []; history = []; selected = null; nextId = 1; dirty = false; curPage = 1;
     $('undo').disabled = true; $('del').disabled = true;
@@ -191,10 +193,10 @@
     ['save', 'saveWork', 'loadWorkBtn', 'addBtn2', 'findBtn'].forEach(i => { $(i).disabled = false; });
     pages = models; renumber(); rebuildDom(); updateFileLabel();
     stage.scrollTo(0, 0); activateTool('text');
-    try {                                              // XFA forms render as a "please wait" placeholder; warn the user
-      const probe = await pdfjs.getDocument({ data: src.bytes.slice(), isEvalSupported: false, enableXfa: true }).promise;
-      if (probe.isPureXfa) toast('This is a dynamic XFA form and cannot be filled here. Use the form’s printable PDF version.', true);
-      probe.destroy();
+    try {                                              // dynamic XFA forms show only a "please wait" page
+      const { info } = await src.doc.getMetadata();
+      if (info && info.IsXFAPresent && !(await fieldObjects(src))) toast('This is a dynamic XFA form and cannot be filled here. Use the form’s printable PDF version.', true);
+      else if (await fieldObjects(src)) hint('This PDF has form fields: click a field (or press Tab) to fill it in.');
     } catch { /* ignore */ }
   }
 
@@ -219,9 +221,9 @@
   const renumber = () => pages.forEach((p, i) => { p.n = i + 1; });
   // Apply a new page list (reordered / added / removed). Items follow their pages; items on removed pages go.
   function restructure(list) {
-    const old = pages, pos = new Map(list.map((p, i) => [p, i + 1]));
+    const old = pages, pos = new Map(list.map((p, i) => [p, i + 1])), keep = new Set(list);
     items = items.map(it => ({ ...it, page: pos.get(old[it.page - 1]) })).filter(it => it.page);
-    old.forEach(p => { if (p.task) { try { p.task.cancel(); } catch { /* ignore */ } } });
+    old.forEach(p => { if (!keep.has(p)) dropPage(p); });
     pages = list; renumber();
     sources = sources.filter(s => pages.some(p => p.src === s) || (s.doc.destroy(), false));
     selected = null; history = []; dirty = true; curPage = clamp(curPage, 1, pages.length);
@@ -249,90 +251,185 @@
     document.title = (sources.length ? first + (extra > 0 ? ` + ${extra}` : '') + ' – ' : '') + 'Fill PDF';
   }
 
+  // Page DOM: canvas (picture) < textLayer (Select tool) < annotationLayer (form fields) < layer (our items) < ghost.
+  // Elements are made once per page and reused when pages are reordered.
   function buildPageDom(p) {
-    const el = document.createElement('div'); el.className = 'page';
-    const canvas = document.createElement('canvas');
+    const el = document.createElement('div'); el.className = 'page'; el._p = p;
+    const canvas = document.createElement('canvas'); canvas.width = canvas.height = 0;   // no pixels until drawn
+    const textEl = document.createElement('div'); textEl.className = 'textLayer';
+    const annEl = document.createElement('div'); annEl.className = 'annotationLayer';
     const layer = document.createElement('div'); layer.className = 'layer';
     const ghost = document.createElement('div'); ghost.className = 'ghost';
-    const textEl = document.createElement('div'); textEl.className = 'textLayer';
-    const num = document.createElement('div'); num.className = 'num'; num.textContent = p.n;
-    el.append(canvas, textEl, layer, ghost, num); pagesEl.appendChild(el);
-    Object.assign(p, { el, canvas, textEl, layer, ghost, task: null, textTask: null, rendered: 0 });
+    const num = document.createElement('div'); num.className = 'num';
+    el.append(canvas, textEl, annEl, layer, ghost, num);
+    Object.assign(p, { el, canvas, textEl, annEl, layer, ghost, num, task: null, drawn: null, textRot: null, ann: null, annRot: null });
     attachLayer(p);
   }
+  function dropPage(p) {                               // page leaves the document
+    if (p.task) { try { p.task.cancel(); } catch { /* ignore */ } }
+    if (p.el) { pageIO && pageIO.unobserve(p.el); near.delete(p); }
+    if (p.thumb) { thumbObserver && thumbObserver.unobserve(p.thumb); thumbWant.delete(p); }
+  }
   function rebuildDom() {
-    thumbObserver && thumbObserver.disconnect();
-    pagesEl.textContent = ''; thumbList.textContent = '';
-    pages.forEach(p => { buildPageDom(p); addThumb(p); });
-    computeScale(); layout(); activateTool(tool); updatePageInfo();
+    pages.forEach(p => { if (!p.el) buildPageDom(p); if (!p.thumb) addThumb(p); });
+    pagesEl.replaceChildren(...pages.map(p => p.el));
+    thumbList.replaceChildren(...pages.map(p => p.thumb));
+    pages.forEach(p => {
+      p.num.textContent = p.n; p.thumb.dataset.n = p.n; p.thumbNum.textContent = p.n;
+      p.thumbGo.setAttribute('aria-label', 'Go to page ' + p.n); p.thumbDel.setAttribute('aria-label', 'Remove page ' + p.n);
+      p.thumb.className = 'thumb s' + (sources.indexOf(p.src) % 6) + (p.n === curPage ? ' cur' : '');
+      pageIO && pageIO.observe(p.el); thumbObserver && thumbObserver.observe(p.thumb);
+    });
+    lastCurThumb = null;
+    computeScale(); layout(); redrawAll(); activateTool(tool); updatePageInfo();
   }
 
   /* ---------- layout & rendering ---------- */
+  // Items live in a layer measured in page units x U (so tiny fonts are never clamped by the browser), which is
+  // scaled and turned with one CSS transform. Zooming therefore only changes a few styles per page; the canvas
+  // keeps its old (stretched) picture until the scheduler re-renders it.
+  const U = 4;
+  const MAX_PX = 16777216;                             // canvas pixel cap per page (same as pdf.js' viewer)
   function computeScale() {
     if (!fit || !pages.length) return;
     const avail = stage.clientWidth - (window.innerWidth <= 860 ? 16 : 44) - (stage.offsetWidth - stage.clientWidth);
     const widest = Math.max(...pages.map(p => dims(p)[0]));
     scale = clamp(avail / widest, 0.4, 1.5);
   }
+  function placePage(p) {
+    const [W, H] = dims(p).map(v => v * scale);
+    p.el.style.width = W + 'px'; p.el.style.height = H + 'px';
+    p.layer.style.width = p.w * U + 'px'; p.layer.style.height = p.h * U + 'px';
+    p.layer.style.transform = { 0: '', 90: `translate(${W}px,0) rotate(90deg)`, 180: `translate(${W}px,${H}px) rotate(180deg)`, 270: `translate(0,${H}px) rotate(270deg)` }[p.rot] + ` scale(${scale / U})`;
+  }
   function layout() {
     $('zoomFit').textContent = Math.round(scale * 100) + '%';
     $('zoomFit').title = fit ? 'Fit to width (on)' : 'Fit to width';
-    pages.forEach(p => {
-      const [W, H] = dims(p).map(v => v * scale);
-      p.el.style.width = W + 'px'; p.el.style.height = H + 'px';
-      p.layer.style.width = p.w * scale + 'px'; p.layer.style.height = p.h * scale + 'px';   // unrotated, turned to fit
-      p.layer.style.transform = { 0: '', 90: `translate(${W}px,0) rotate(90deg)`, 180: `translate(${W}px,${H}px) rotate(180deg)`, 270: `translate(0,${H}px) rotate(270deg)` }[p.rot];
-      p.textEl.textContent = '';                         // stale until the page is re-rendered
-      p.rendered = 0; redraw(p.n);
-    });
-    renderVisible();
+    pagesEl.style.setProperty('--scale-factor', scale);     // pdf.js text and form layers size themselves with it
+    pagesEl.style.setProperty('--inv', U / scale);          // keeps outlines and handles a constant screen size
+    pages.forEach(placePage);
+    pump();
   }
-  async function renderPage(p) {
-    const stamp = ++p.rendered;                 // marks "render started"; layout() resets to 0
-    const vp = p.page.getViewport({ scale, rotation: p.rot });
-    const dpr = Math.min(window.devicePixelRatio || 1, 2);
-    if (p.task) { try { p.task.cancel(); } catch { /* ignore */ } }
-    const c = p.canvas;
-    c.width = Math.floor(vp.width * dpr); c.height = Math.floor(vp.height * dpr);
-    const task = p.page.render({ canvasContext: c.getContext('2d'), viewport: vp, transform: dpr !== 1 ? [dpr, 0, 0, dpr, 0, 0] : null });
-    p.task = task;
-    try { await task.promise; } catch (e) { if (e && e.name === 'RenderingCancelledException') { p.rendered = 0; return; } }
-    p.rendered = stamp;
-    renderText(p, vp);
+
+  /* render scheduler: one page at a time, nearest to the middle of the view first; pages far away are freed */
+  const near = new Set(), thumbWant = new Set();
+  let busy = false;
+  const dpr = () => Math.min(window.devicePixelRatio || 1, 2);
+  const keyOf = p => scale + '|' + p.rot + '|' + dpr();
+  const pageIO = 'IntersectionObserver' in window ? new IntersectionObserver(entries => {
+    for (const en of entries) {
+      const p = en.target._p; if (!p) continue;
+      if (en.isIntersecting) near.add(p); else { near.delete(p); evict(p); }
+    }
+    pump(); trackCurrent();
+  }, { root: stage, rootMargin: '120% 0px' }) : null;
+  function evict(p) {                                  // free the picture of a page that scrolled far away
+    if (p.task) { try { p.task.cancel(); } catch { /* ignore */ } p.task = null; }
+    if (p.drawn) { p.canvas.width = p.canvas.height = 0; p.drawn = null; try { p.page.cleanup(); } catch { /* ignore */ } }
   }
-  async function renderText(p, vp) {                  // invisible, selectable text over the canvas
-    if (p.textTask) { try { p.textTask.cancel(); } catch { /* ignore */ } }
-    p.textEl.textContent = '';
+  function nextJob() {
+    const sr = stage.getBoundingClientRect(), mid = (sr.top + sr.bottom) / 2;
+    let best = null, bestD = Infinity, kind = null;
+    for (const p of near) {
+      const want = p.drawn !== keyOf(p) ? 'draw' : p.annRot === null ? 'form' : p.ann && p.annRot !== p.rot ? 'form'
+        : document.body.classList.contains('mode-select') && p.textRot !== p.rot + '|' + scale ? 'text' : null;
+      if (!want) continue;
+      const r = p.el.getBoundingClientRect(), d = r.bottom < mid ? mid - r.bottom : r.top > mid ? r.top - mid : 0;
+      const dd = d + (want === 'draw' ? 0 : 1e5);      // all pictures before forms and text
+      if (dd < bestD) { bestD = dd; best = p; kind = want; }
+    }
+    if (best) return [kind, best];
+    for (const p of thumbWant) return ['thumb', p];
+    return null;
+  }
+  let pumpRaf = 0;                                    // batch requests; measure only after the browser laid out
+  function pump() { if (!pumpRaf) pumpRaf = requestAnimationFrame(() => { pumpRaf = 0; runPump(); }); }
+  async function runPump() {
+    if (busy || !pages.length) return;
+    const job = nextJob(); if (!job) return;
+    busy = true;
+    const [kind, p] = job;
     try {
-      const t = pdfjs.renderTextLayer({ textContentSource: p.page.streamTextContent(), container: p.textEl, viewport: vp, textDivs: [] });
-      p.textTask = t; await t.promise;
-    } catch { /* cancelled, or the page has no text */ }
+      if (kind === 'draw') await drawPage(p);
+      else if (kind === 'form') await buildForm(p);
+      else if (kind === 'text') await buildText(p);
+      else await drawThumb(p);
+    } catch (e) { if (!(e && e.name === 'RenderingCancelledException')) console.warn(e); }
+    busy = false;
+    runPump();
   }
-  let raf = 0;
-  function renderVisible() {
-    cancelAnimationFrame(raf);
-    raf = requestAnimationFrame(() => {
-      const sr = stage.getBoundingClientRect(); const margin = 700;
-      let best = null, bestVis = 0;
-      for (const p of pages) {
-        const r = p.el.getBoundingClientRect();
-        if (r.bottom > sr.top - margin && r.top < sr.bottom + margin && p.rendered === 0) renderPage(p);
-        const vis = Math.min(r.bottom, sr.bottom) - Math.max(r.top, sr.top);
+  async function drawPage(p) {
+    const key = keyOf(p), vp = p.page.getViewport({ scale, rotation: p.rot });
+    const out = Math.min(dpr(), Math.sqrt(MAX_PX / (vp.width * vp.height)));
+    const c = document.createElement('canvas');      // draw off-screen; the old picture stays up meanwhile
+    c.width = Math.floor(vp.width * out); c.height = Math.floor(vp.height * out);
+    const task = p.page.render({ canvasContext: c.getContext('2d', { alpha: false }), viewport: vp,
+      transform: out !== 1 ? [out, 0, 0, out, 0, 0] : null, annotationMode: pdfjs.AnnotationMode.ENABLE_FORMS });
+    p.task = task;
+    try { await task.promise; } finally { if (p.task === task) p.task = null; }
+    if (!near.has(p) || keyOf(p) !== key) return;    // scrolled away or zoomed meanwhile
+    p.canvas.width = p.canvas.height = 0; p.canvas.replaceWith(c); p.canvas = c; p.drawn = key;
+    if (p.thumbRot !== p.rot) drawThumbFrom(p, c);
+  }
+  async function buildText(p) {                       // invisible, selectable text (Select tool only)
+    p.textRot = p.rot + '|' + scale; p.textEl.textContent = '';
+    try {
+      await pdfjs.renderTextLayer({ textContentSource: p.page.streamTextContent(), container: p.textEl,
+        viewport: p.page.getViewport({ scale, rotation: p.rot }), textDivs: [] }).promise;
+    } catch { /* the page has no text */ }
+  }
+
+  /* ---------- form fields (pdf.js renders real inputs; values are written back by pdf.js on save) ---------- */
+  const NO_LINKS = { externalLinkEnabled: false, isInPresentationMode: false, page: 0, rotation: 0, eventBus: null,
+    getDestinationHash: () => '#', getAnchorUrl: () => '#', addLinkAttributes(a) { a.href = '#'; a.onclick = () => false; },
+    goToDestination() {}, goToPage() {}, navigateTo() {}, executeNamedAction() {}, executeSetOCGState() {}, cachePageRef() {} };
+  function fieldObjects(src) {
+    if (!src.fields) src.fields = src.doc.getFieldObjects().catch(() => null);
+    return src.fields;
+  }
+  async function buildForm(p) {
+    if (p.ann) { p.annRot = p.rot; p.ann.update({ viewport: p.page.getViewport({ scale: 1, rotation: p.rot }).clone({ dontFlip: true }) }); return; }
+    p.annRot = p.rot;
+    if (!(await fieldObjects(p.src))) return;         // no form in this file
+    const annots = (await p.page.getAnnotations({ intent: 'display' })).filter(a => a.subtype === 'Widget');
+    if (!annots.length) return;
+    const storage = p.src.doc.annotationStorage;
+    if (!storage.onSetModified) storage.onSetModified = () => { dirty = true; };
+    p.ann = new pdfjs.AnnotationLayer({ div: p.annEl, accessibilityManager: null, annotationCanvasMap: new Map(), page: p.page,
+      viewport: p.page.getViewport({ scale: 1, rotation: p.rot }).clone({ dontFlip: true }) });
+    await p.ann.render({ annotations: annots, linkService: NO_LINKS, renderForms: true, annotationStorage: storage,
+      imageResourcesPath: '', downloadManager: null, enableScripting: false, hasJSActions: false, fieldObjects: await fieldObjects(p.src) });
+  }
+  const fieldAt = (x, y) => {                          // a form input under a screen point, if any
+    for (const el of document.elementsFromPoint(x, y)) {
+      if (el.closest('.layer')) continue;
+      const sec = el.closest('.annotationLayer section'); if (!sec) continue;
+      return sec.querySelector('input, textarea, select') || null;
+    }
+    return null;
+  };
+
+  let curThumbRaf = 0, lastCurThumb = null;
+  function trackCurrent() {                            // the page most in view (looks at nearby pages only)
+    cancelAnimationFrame(curThumbRaf);
+    curThumbRaf = requestAnimationFrame(() => {
+      const sr = stage.getBoundingClientRect(); let best = null, bestVis = 0;
+      for (const p of near) {
+        const r = p.el.getBoundingClientRect(), vis = Math.min(r.bottom, sr.bottom) - Math.max(r.top, sr.top);
         if (vis > bestVis) { bestVis = vis; best = p; }
       }
       if (best && best.n !== curPage) { curPage = best.n; updatePageInfo(); }
-      else updatePageInfo();
     });
   }
   function updatePageInfo() {
     $('pageinfo').textContent = hasDoc() ? `Page ${curPage} of ${pages.length}` : '';
-    document.querySelectorAll('.thumb').forEach(t => {
-      const on = +t.dataset.n === curPage; t.classList.toggle('cur', on);
-      if (on && t.dataset.lastCur !== '1') { t.scrollIntoView({ block: 'nearest' }); }
-      t.dataset.lastCur = on ? '1' : '';
-    });
+    const t = pages[curPage - 1] && pages[curPage - 1].thumb;
+    if (t === lastCurThumb) return;
+    if (lastCurThumb) lastCurThumb.classList.remove('cur');
+    if (t) { t.classList.add('cur'); t.scrollIntoView({ block: 'nearest' }); }
+    lastCurThumb = t;
   }
-  stage.addEventListener('scroll', renderVisible, { passive: true });
+  stage.addEventListener('scroll', () => { trackCurrent(); pump(); }, { passive: true });
   let resizeT;
   addEventListener('resize', () => {
     clearTimeout(resizeT);
@@ -341,29 +438,37 @@
 
   /* ---------- thumbnails / page list ---------- */
   const thumbObserver = 'IntersectionObserver' in window ? new IntersectionObserver(entries => {
-    entries.forEach(async en => {
-      if (!en.isIntersecting) return;
-      thumbObserver.unobserve(en.target);
-      const p = pages[+en.target.dataset.n - 1]; if (!p) return;
-      const c = en.target.querySelector('canvas');
-      const vp = p.page.getViewport({ scale: 110 / dims(p)[0], rotation: p.rot });
-      c.width = Math.floor(vp.width); c.height = Math.floor(vp.height);
-      try { await p.page.render({ canvasContext: c.getContext('2d'), viewport: vp }).promise; } catch { /* ignore */ }
-    });
+    for (const en of entries) {
+      const p = en.target._p; if (!p) continue;
+      if (en.isIntersecting && p.thumbRot !== p.rot) thumbWant.add(p); else thumbWant.delete(p);
+    }
+    pump();
   }, { root: $('thumbs'), rootMargin: '200px' }) : null;
+  function sizeThumb(p) {
+    const [tw, th] = dims(p), c = p.thumbCanvas;
+    c.width = 110; c.height = Math.round(110 * th / tw); c.style.aspectRatio = `${tw} / ${th}`;
+  }
+  function drawThumbFrom(p, src) {                    // reuse the full page picture: no second render
+    sizeThumb(p); p.thumbCanvas.getContext('2d').drawImage(src, 0, 0, p.thumbCanvas.width, p.thumbCanvas.height);
+    p.thumbRot = p.rot; thumbWant.delete(p);
+  }
+  async function drawThumb(p) {
+    thumbWant.delete(p); p.thumbRot = p.rot; sizeThumb(p);
+    const vp = p.page.getViewport({ scale: 110 / dims(p)[0], rotation: p.rot });
+    await p.page.render({ canvasContext: p.thumbCanvas.getContext('2d', { alpha: false }), viewport: vp }).promise;
+  }
 
   let dragSrc = null;                                  // page being reordered
   function addThumb(p) {
-    const w = document.createElement('div');
-    w.className = 'thumb s' + (sources.indexOf(p.src) % 6); w.dataset.n = p.n; w.draggable = true;
+    const w = document.createElement('div'); w._p = p; w.draggable = true;
     w.title = `${p.src.name} · page ${p.idx + 1}`;
     const go = document.createElement('button'); go.type = 'button'; go.className = 'thumb-go'; go.setAttribute('aria-label', 'Go to page ' + p.n);
-    const c = document.createElement('canvas'), [tw, th] = dims(p); c.width = 110; c.height = Math.round(110 * th / tw); c.style.aspectRatio = `${tw} / ${th}`;
-    const s = document.createElement('span'); s.textContent = p.n;
+    const c = document.createElement('canvas'), s = document.createElement('span');
     go.append(c, s);
     const del = document.createElement('button'); del.type = 'button'; del.className = 'thumb-del'; del.textContent = '×';
     del.title = 'Remove this page'; del.setAttribute('aria-label', 'Remove page ' + p.n);
-    w.append(go, del); thumbList.appendChild(w);
+    w.append(go, del);
+    Object.assign(p, { thumb: w, thumbCanvas: c, thumbNum: s, thumbGo: go, thumbDel: del, thumbRot: null }); sizeThumb(p);
     go.onclick = () => { p.el.scrollIntoView({ block: 'start' }); };
     del.onclick = e => { e.stopPropagation(); removePage(p); };
     go.addEventListener('keydown', e => {              // keyboard reordering
@@ -379,7 +484,6 @@
       e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', 'page ' + p.n);
     });
     w.addEventListener('dragend', () => { dragSrc = null; w.classList.remove('dragging'); clearInsert(); });
-    thumbObserver && thumbObserver.observe(w);
   }
 
   function dropIndex(y) {
@@ -411,30 +515,106 @@
     else { endFileDrag(); addPdfs(e.dataTransfer.files, idx); }
   });
 
+  /* ---------- text fonts ---------- */
+  // Text is saved with Helvetica when it can be (no font file needed). Other text uses an embedded, subset font:
+  // Noto Sans (Latin, Greek, Cyrillic, Vietnamese) or Vazirmatn (Persian / Arabic, shaped by fontkit). Anything else
+  // (e.g. Chinese, Hebrew, emoji) is drawn as a sharp image of the text, so it still looks the same as on screen.
+  const WINANSI = /^[\n\x20-\x7e\xa0-\xff€‚ƒ„…†‡ˆ‰Š‹ŒŽ‘’“”•–—˜™š›œžŸ]*$/;
+  const ARABIC = /[\u0600-\u06ff\u0750-\u077f\u08a0-\u08ff\ufb50-\ufdff\ufe70-\ufeff]/;
+  const VAZIR_OK = /^[\n\x20-\x7e\xa0-\xff\u0600-\u06ff\u0750-\u077f\u08a0-\u08ff\ufb50-\ufdff\ufe70-\ufeff\u200c-\u200f\u2010-\u2027\u2030-\u203a]*$/;
+  const NOTO_OK = /^[\n\x20-\u052f\u1d00-\u1dbf\u1e00-\u1fff\u2000-\u20cf\u2100-\u218f\u2190-\u21ff\u2200-\u22ff\u2c60-\u2c7f\ua720-\ua7ff]*$/;
+  const LH = 1.15;                                     // line height (screen and PDF)
+  const FACE_CSS = { helv: 'Helvetica, Arial, sans-serif', noto: '"Noto Sans", sans-serif', vazir: 'Vazirmatn, sans-serif', img: 'Helvetica, Arial, sans-serif' };
+  const textFace = t => WINANSI.test(t) ? 'helv' : ARABIC.test(t) && VAZIR_OK.test(t) ? 'vazir' : NOTO_OK.test(t) ? 'noto' : 'img';
+  const isRtl = t => { const m = t.match(/[A-Za-z\u00c0-\u024f\u0370-\u052f]|[\u0590-\u08ff\ufb1d-\ufdff\ufe70-\ufeff]/); return !!m && !/[A-Za-z\u00c0-\u024f\u0370-\u052f]/.test(m[0]); };
+  const baselines = new Map();                         // face|weight -> baseline offset from the line top, in em
+  function baselineOf(face, bold) {
+    const k = face + bold; if (baselines.has(k)) return baselines.get(k);
+    const d = document.createElement('div'), m = document.createElement('span');
+    d.style.cssText = `position:absolute;left:-9999px;top:0;white-space:pre;font:${bold ? 700 : 400} 100px/${LH} ${FACE_CSS[face]}`;
+    m.style.cssText = 'display:inline-block;width:1px;height:0;vertical-align:baseline';
+    d.append('Hg', m); document.body.appendChild(d);
+    const b = m.offsetTop / 100; d.remove();
+    baselines.set(k, b); return b;
+  }
+  const loadOnce = new Map();
+  const once = (k, f) => { if (!loadOnce.has(k)) loadOnce.set(k, f().catch(e => { loadOnce.delete(k); throw e; })); return loadOnce.get(k); };
+  const loadScript = src => once(src, () => new Promise((ok, bad) => { const sc = document.createElement('script'); sc.src = src; sc.onload = ok; sc.onerror = bad; document.head.appendChild(sc); }));
+  const FONT_FILES = { noto: ['fonts/NotoSans-Regular.ttf', 'fonts/NotoSans-Bold.ttf'], vazir: ['fonts/Vazirmatn-Regular.ttf', 'fonts/Vazirmatn-Bold.ttf'] };
+  const fontBytes = (face, bold) => { const u = FONT_FILES[face][bold ? 1 : 0]; return once(u, async () => new Uint8Array(await (await fetch(u)).arrayBuffer())); };
+  // screen fonts for faces other than Helvetica are fetched only when such text appears
+  const ensureCssFace = (face, bold) => face === 'noto' || face === 'vazir'
+    ? once('css' + face + bold, () => document.fonts.load(`${bold ? 700 : 400} 20px ${FACE_CSS[face]}`)).then(() => baselines.delete(face + bold)) : Promise.resolve();
+
+  /* bidi for Persian / Arabic lines (UAX #9, simplified: no explicit marks or mirrored brackets).
+     Returns runs in visual order, left to right; each run keeps its logical text so fontkit can shape it. */
+  const T_R = /[֐-ٟ٪-ۯۺ-ࣿיִ-﷿ﹰ-﻿]/, T_AN = /[٠-٩۰-۹]/,
+    T_EN = /[0-9]/, T_L = /[A-Za-zÀ-ɏͰ-ԯ]/;
+  function bidiRuns(line, rtl) {
+    const ch = [...line], P = rtl ? 1 : 0;
+    const t = ch.map(c => T_R.test(c) ? 'R' : T_AN.test(c) ? 'AN' : T_EN.test(c) ? 'EN' : T_L.test(c) ? 'L' : 'N');
+    let strong = rtl ? 'R' : 'L';                      // W2 / W7: European digits take the colour of the last strong letter
+    for (let i = 0; i < t.length; i++) {
+      if (t[i] === 'R' || t[i] === 'L') strong = t[i];
+      else if (t[i] === 'EN') t[i] = strong === 'R' ? 'AN' : 'L';
+    }
+    const asDir = x => x === 'L' ? 'L' : x === 'N' ? null : 'R';   // numbers count as R next to neutrals (N1)
+    for (let i = 0; i < t.length; i++) {
+      if (t[i] !== 'N') continue;
+      let a = i - 1; while (a >= 0 && t[a] === 'N') a--;
+      let b = i + 1; while (b < t.length && t[b] === 'N') b++;
+      const prev = a >= 0 ? asDir(t[a]) : (rtl ? 'R' : 'L'), next = b < t.length ? asDir(t[b]) : (rtl ? 'R' : 'L');
+      for (let k = i; k < b; k++) t[k] = prev === next ? prev : (rtl ? 'R' : 'L');
+      i = b - 1;
+    }
+    const lv = t.map(x => P === 0 ? (x === 'L' ? 0 : x === 'R' ? 1 : 2) : (x === 'L' || x === 'AN' ? 2 : 1));
+    const runs = [];                                   // level runs, logical order
+    ch.forEach((c, i) => { const r = runs[runs.length - 1]; if (r && r.lv === lv[i]) r.text += c; else runs.push({ lv: lv[i], text: c }); });
+    const top = Math.max(0, ...lv), lowOdd = Math.min(...lv.filter(x => x % 2), 99);
+    for (let L = top; L >= lowOdd && L > 0; L--) {     // L2: reverse every stretch at level L or above
+      for (let i = 0; i < runs.length; ) {
+        if (runs[i].lv < L) { i++; continue; }
+        let j = i; while (j < runs.length && runs[j].lv >= L) j++;
+        runs.splice(i, j - i, ...runs.slice(i, j).reverse()); i = j;
+      }
+    }
+    return runs.map(r => ({ rtl: r.lv % 2 === 1, text: r.text }));
+  }
+
   /* ---------- items ---------- */
   function redraw(n) {
     const p = pages[n - 1]; if (!p) return;
     p.layer.textContent = '';
     items.filter(i => i.page === n).forEach(it => addEl(p, it));
   }
+  function redrawAll() {
+    const by = new Map(); items.forEach(it => { if (!by.has(it.page)) by.set(it.page, []); by.get(it.page).push(it); });
+    pages.forEach(p => { p.layer.textContent = ''; (by.get(p.n) || []).forEach(it => addEl(p, it)); });
+  }
   function addEl(p, it) {
     const el = document.createElement('div');
     el.className = 'item ' + (it.type === 'text' ? 'text' : it.type === 'sign' ? 'sign' : it.type === 'redact' ? 'redact' : 'mark') + (it.bold ? ' bold' : '') + (it.id === selected ? ' sel' : '');
     el.dataset.id = it.id;
     if (it.type === 'text') {
-      el.style.fontSize = it.size * scale + 'px'; el.style.color = CSS_COLOR[it.color] || '#000';
-      el.textContent = it.text;
+      el.style.fontSize = it.size * U + 'px'; el.style.color = CSS_COLOR[it.color] || '#000';
+      el.textContent = it.text; styleText(el, it.text, it.bold);
     } else if (it.type === 'sign') {
-      el.appendChild(sigEl(it, scale));
+      el.appendChild(sigEl(it, U));
     } else if (it.type === 'redact') {
-      el.style.width = it.w * scale + 'px'; el.style.height = it.h * scale + 'px'; el.title = 'Redaction';
+      el.style.width = it.w * U + 'px'; el.style.height = it.h * U + 'px'; el.title = 'Redaction';
       const h = document.createElement('span'); h.className = 'rh'; el.appendChild(h);
     } else {
-      el.appendChild(markSVG(it.type, markBox(it) * scale, it.color));
+      el.appendChild(markSVG(it.type, markBox(it) * U, it.color));
     }
     const [ox, oy] = originOf(it); el.style.left = ox + 'px'; el.style.top = oy + 'px';
     if (it.ang && it.type !== 'redact') { el.style.transform = `rotate(${-it.ang}deg)`; el.style.transformOrigin = it.type === 'text' ? '0 0' : '50% 50%'; }
     p.layer.appendChild(el); return el;
+  }
+  function styleText(el, text, bold) {                // font and direction follow the text, as in the saved PDF
+    const face = textFace(text);
+    el.style.fontFamily = face === 'helv' ? '' : FACE_CSS[face];
+    el.dir = isRtl(text) ? 'rtl' : 'ltr';
+    ensureCssFace(face, bold);
   }
   function select(id) {
     selected = id; $('del').disabled = id == null;
@@ -466,6 +646,7 @@
       }
       if (e.key === 'Escape' || (e.key === 'Enter' && !e.shiftKey)) { e.preventDefault(); el.blur(); }
     });
+    el.addEventListener('input', () => styleText(el, el.innerText, it.bold));
     el.addEventListener('paste', e => {          // paste as plain text
       e.preventDefault(); document.execCommand('insertText', false, (e.clipboardData.getData('text/plain') || '').slice(0, 500));
     });
@@ -476,18 +657,38 @@
   });
 
   /* ---------- pointer handling (one handler per page layer) ---------- */
+  // Over a form field, the item layer lets the pointer through so the field gets clicks, text selection and the
+  // right cursor. Our items stay clickable (they keep pointer-events). It switches back once the pointer leaves.
+  const FIELD_TOOLS = new Set(['text', 'check', 'cross', 'sign']);
+  let passL = null;
+  function passThrough(L) {
+    if (passL === L) return;
+    if (passL) passL.classList.remove('pass');
+    passL = L; L.classList.add('pass');
+    addEventListener('pointermove', unpass, { passive: true });
+  }
+  function unpass(e) {
+    if (e.target.closest && e.target.closest('.annotationLayer section')) return;
+    if (passL) passL.classList.remove('pass');
+    passL = null; removeEventListener('pointermove', unpass);
+  }
   function attachLayer(p) {
     const L = p.layer;
     L.addEventListener('pointermove', e => {
+      if (p.ann && FIELD_TOOLS.has(tool) && e.target === L && fieldAt(e.clientX, e.clientY)) { passThrough(L); p.ghost.style.display = 'none'; return; }
       const ghostTool = tool === 'check' || tool === 'cross' || (tool === 'sign' && sig);
       if (e.pointerType !== 'mouse' || !ghostTool || e.target.closest('.item')) { p.ghost.style.display = 'none'; return; }
-      const r = L.getBoundingClientRect(); let w, h;
-      p.ghost.textContent = '';
-      if (tool === 'sign') {
-        const it = { text: sig.text, font: sig.font, size: signSize, color }, c = sigImage(it);
-        p.ghost.appendChild(sigEl(it, scale)); w = c.w * scale; h = c.h * scale;
-      } else { w = h = size * 1.15 * scale; p.ghost.appendChild(markSVG(tool, w, color)); }
-      p.ghost.style.left = (e.clientX - r.left - w / 2) + 'px'; p.ghost.style.top = (e.clientY - r.top - h / 2) + 'px'; p.ghost.style.display = 'block';
+      const key = [tool, scale, size, signSize, color, sig && sig.text, sig && sig.font].join('|');
+      if (p.ghost.dataset.key !== key) {               // rebuild the preview only when it changes
+        p.ghost.textContent = ''; p.ghost.dataset.key = key;
+        if (tool === 'sign') {
+          const it = { text: sig.text, font: sig.font, size: signSize, color }, c = sigImage(it);
+          p.ghost.appendChild(sigEl(it, scale)); p.ghostW = c.w * scale; p.ghostH = c.h * scale;
+        } else { p.ghostW = p.ghostH = size * 1.15 * scale; p.ghost.appendChild(markSVG(tool, p.ghostW, color)); }
+      }
+      const r = p.el.getBoundingClientRect();
+      p.ghost.style.transform = `translate(${e.clientX - r.left - p.ghostW / 2}px,${e.clientY - r.top - p.ghostH / 2}px)`;
+      p.ghost.style.display = 'block';
     });
     L.addEventListener('pointerleave', () => { p.ghost.style.display = 'none'; });
 
@@ -499,6 +700,13 @@
       if (target && target.isContentEditable) return;
       if (target) { if (e.target.classList.contains('rh')) startResize(e, p, target); else startDrag(e, p, target); return; }
       if (tool === 'select') { select(null); return; }
+      const field = p.ann && FIELD_TOOLS.has(tool) && fieldAt(e.clientX, e.clientY);
+      if (field) {                                     // touch, or the hover hand-over did not happen: use the form field
+        e.preventDefault();
+        if (field.type === 'checkbox' || field.type === 'radio') field.click();
+        else { field.focus(); if (field.tagName === 'SELECT') try { field.showPicker(); } catch { /* ignore */ } }
+        return;
+      }
       if (tool === 'redact') { startRedactBox(e, p); return; }
       if (tool === 'sign' && !sig) { openSignDialog(); return; }
       const [x, y] = toBase(p, e.clientX, e.clientY);
@@ -509,7 +717,7 @@
       p.ghost.style.display = 'none';
       if (tool === 'text') {
         // (x, y) is the top-left of the text; centre the first line on the click point
-        const [dx, dy] = rotVec(0, size * 0.5, it.ang); it.x = x - dx; it.y = y - dy;
+        const [dx, dy] = rotVec(0, size * LH / 2, it.ang); it.x = x - dx; it.y = y - dy;
         redraw(p.n); const el = L.querySelector(`[data-id="${it.id}"]`); el.textContent = '';
         editText(it, el, true); e.preventDefault();
       } else { redraw(p.n); select(it.id); }
@@ -545,7 +753,7 @@
     const move = ev => {
       const [bx, by] = toBase(p, ev.clientX, ev.clientY), x = clamp(bx, 0, p.w), y = clamp(by, 0, p.h);
       box = { x: Math.min(sx, x), y: Math.min(sy, y), w: Math.abs(x - sx), h: Math.abs(y - sy) };
-      Object.assign(band.style, { left: box.x * scale + 'px', top: box.y * scale + 'px', width: box.w * scale + 'px', height: box.h * scale + 'px' });
+      Object.assign(band.style, { left: box.x * U + 'px', top: box.y * U + 'px', width: box.w * U + 'px', height: box.h * U + 'px' });
     };
     const up = () => {
       removeEventListener('pointermove', move); removeEventListener('pointerup', up); removeEventListener('pointercancel', up);
@@ -565,7 +773,7 @@
       if (!moved) { pushHistory(); moved = true; }
       const [bx, by] = toBase(p, ev.clientX, ev.clientY);
       it.w = clamp(ow + bx - sx, 2, p.w - it.x); it.h = clamp(oh + by - sy, 2, p.h - it.y);
-      target.style.width = it.w * scale + 'px'; target.style.height = it.h * scale + 'px';
+      target.style.width = it.w * U + 'px'; target.style.height = it.h * U + 'px';
     };
     const up = () => { removeEventListener('pointermove', move); removeEventListener('pointerup', up); removeEventListener('pointercancel', up); };
     addEventListener('pointermove', move); addEventListener('pointerup', up); addEventListener('pointercancel', up);
@@ -671,13 +879,7 @@
   function rotatePage(d) {
     const p = pages[curPage - 1]; if (!p) return;
     p.rot = (p.rot + d + 360) % 360; dirty = true;
-    computeScale(); layout();
-    const t = thumbList.children[p.n - 1];
-    if (t) {                                           // re-render its thumbnail at the new shape
-      const c = t.querySelector('canvas'), [tw, th] = dims(p);
-      c.width = 110; c.height = Math.round(110 * th / tw); c.style.aspectRatio = `${tw} / ${th}`;
-      thumbObserver && thumbObserver.observe(t);
-    }
+    computeScale(); layout();                          // the picture, thumbnail, text and form layers follow
     p.el.scrollIntoView({ block: 'nearest' });
     hint(`Page ${p.n} rotated. Items on it turn with the page. Save PDF to keep the change.`);
   }
@@ -742,9 +944,15 @@
       const redacting = redRects.size > 0, red = { glyphs: 0, images: 0, annots: 0 };
       const merged = redacting || !(sources.length === 1 && pages.length === sources[0].doc.numPages && pages.every((p, i) => p.idx === i));
       const load = async s => {
-        let d = null;                                  // encrypted files can fail here (scrambled object streams)
-        try { d = await PDFDocument.load(s.bytes, { ignoreEncryption: true }); } catch (e) { console.warn(e); }
-        if (!d || d.isEncrypted) d = await PdfDecrypt.load(s.bytes, s.password);   // saved copy has no encryption
+        // form field values: pdf.js writes them (with their appearance) into a copy of the file
+        const bytes = s.doc.annotationStorage.size ? await s.doc.saveDocument() : s.bytes;
+        // encrypted (the trailer, at the end, names /Encrypt): decrypt while parsing; the saved copy has no encryption
+        const tail = new TextDecoder('latin1').decode(bytes.subarray(Math.max(0, bytes.length - 65536)));
+        let d = null;
+        if (!tail.includes('/Encrypt')) {
+          try { d = await PDFDocument.load(bytes, { ignoreEncryption: true, parseSpeed: PDFLib.ParseSpeeds.Fastest }); } catch (e) { console.warn(e); }
+        }
+        if (!d || d.isEncrypted) d = await PdfDecrypt.load(bytes, s.password);
         for (const p of pages) {                       // redact every page of this source before copying any of them
           if (p.src !== s || !redRects.has(p)) continue;
           let r;
@@ -762,13 +970,16 @@
           const [cp] = await doc.copyPages(sd, [p.idx]); doc.addPage(cp);
         }
       }
-      const font = await doc.embedFont(StandardFonts.Helvetica);
-      const fontBold = await doc.embedFont(StandardFonts.HelveticaBold);
-      const pgs = doc.getPages(); let replaced = false;
+      const pgs = doc.getPages();
       pages.forEach((p, i) => pgs[i].setRotation(degrees(p.rot)));
       if (items.some(i => i.type === 'sign')) await loadFonts();
-      const sigImgs = new Map();
-      const safe = s => [...s].map(ch => { try { font.encodeText(ch); return ch; } catch { replaced = true; return '?'; } }).join('');
+      const sigImgs = new Map(), fonts = new Map();
+      const pdfFont = (face, b) => {                   // embedded once per document, on first use
+        const k = face + b;
+        if (!fonts.has(k)) fonts.set(k, face === 'helv' ? doc.embedFont(b ? StandardFonts.HelveticaBold : StandardFonts.Helvetica)
+          : (async () => { await loadScript('lib/fontkit.umd.min.js'); doc.registerFontkit(window.fontkit); return doc.embedFont(await fontBytes(face, b), { subset: true }); })());
+        return fonts.get(k);
+      };
       for (const it of items) {
         const pg = pgs[it.page - 1], p = pages[it.page - 1]; if (!pg || !p || it.type === 'redact') continue;
         const col = rgb(...(COLORS[it.color] || COLORS.black)), a = it.ang || 0, vp0 = p.page.getViewport({ scale: 1, rotation: 0 });
@@ -779,11 +990,7 @@
           const [x, y] = at(-c.w / 2, c.h / 2);           // bottom-left corner of the image
           pg.drawImage(sigImgs.get(c.url), { x, y, width: c.w, height: c.h, rotate: degrees(a) });
         } else if (it.type === 'text') {
-          safe(it.text).split('\n').forEach((line, n) => {
-            if (!line) return;
-            const [x, y] = at(0, it.size * 0.82 + n * it.size * 1.15);
-            pg.drawText(line, { x, y, size: it.size, font: it.bold ? fontBold : font, color: col, rotate: degrees(a) });
-          });
+          await drawTextItem(doc, pg, it, at, col, pdfFont);
         } else {
           const b = markBox(it), k = b / 10;
           const P = (px, py) => { const [x, y] = at(px * k - b / 2, py * k - b / 2); return { x, y }; };
@@ -796,12 +1003,12 @@
         const pg = pgs[p.n - 1];
         rs.forEach(r => pg.drawRectangle({ x: r[0], y: r[1], width: r[2] - r[0], height: r[3] - r[1], color: rgb(0, 0, 0) }));
       });
-      const out = await doc.save();
+      const out = await doc.save({ objectsPerTick: Infinity });
       download(new Blob([out], { type: 'application/pdf' }), baseName() + (redacting ? '-redacted' : merged ? '-combined' : '-filled') + '.pdf');
       dirty = false;
       if (red.images) toast('Saved, but a redaction box covers an image (for example a scanned page). The box hides it, but the picture underneath was not changed. Do not rely on it for scans.', true);
-      else if (redacting) toast(`Saved. Removed ${red.glyphs} character${red.glyphs === 1 ? '' : 's'}${red.annots ? ` and ${red.annots} form field${red.annots === 1 ? '' : 's'}/note${red.annots === 1 ? '' : 's'}` : ''} under the black boxes.`, replaced);
-      else toast(replaced ? 'Saved. Some characters are not supported by the PDF font and were replaced with “?”.' : 'Saved to your Downloads folder. The original file was not changed.', replaced);
+      else if (redacting) toast(`Saved. Removed ${red.glyphs} character${red.glyphs === 1 ? '' : 's'}${red.annots ? ` and ${red.annots} form field${red.annots === 1 ? '' : 's'}/note${red.annots === 1 ? '' : 's'}` : ''} under the black boxes.`);
+      else toast('Saved to your Downloads folder. The original file was not changed.');
     } catch (e) {
       console.error(e);
       const m = e && e.message || '';
@@ -811,6 +1018,47 @@
         : m.startsWith('REDACT:') ? `Could not safely redact page ${m.slice(7)}, so nothing was saved.`
           : 'Could not save this PDF.', true);
     } finally { btn.disabled = false; btn.textContent = 'Save PDF'; }
+  }
+
+  // One text item into the PDF, matching the screen: same font, line boxes (LH), baseline, direction and alignment.
+  async function drawTextItem(doc, pg, it, at, col, pdfFont) {
+    const { degrees } = PDFLib, rot = degrees(it.ang || 0), lines = it.text.split('\n'), rtl = isRtl(it.text);
+    let face = textFace(it.text), font = null;
+    if (face !== 'img') {
+      try {
+        font = await pdfFont(face, !!it.bold);
+        const fk = face !== 'helv' && font.embedder && font.embedder.font;
+        if (fk && [...it.text].some(c => c !== '\n' && !fk.hasGlyphForCodePoint(c.codePointAt(0)))) face = 'img';
+      } catch (e) { console.warn(e); face = 'img'; }
+    }
+    if (face === 'img') {                              // any script: a sharp picture of the text
+      const K = 4, S = it.size * K, P = Math.ceil(S * 0.5), cv = document.createElement('canvas'), ctx = cv.getContext('2d');
+      const css = `${it.bold ? 700 : 400} ${S}px ${FACE_CSS.img}`; ctx.font = css;
+      const W = Math.ceil(Math.max(1, ...lines.map(l => ctx.measureText(l).width))), H = Math.ceil(lines.length * LH * S);
+      cv.width = W + 2 * P; cv.height = H + 2 * P;
+      ctx.font = css; ctx.fillStyle = CSS_COLOR[it.color] || '#000'; ctx.direction = rtl ? 'rtl' : 'ltr'; ctx.textAlign = rtl ? 'right' : 'left';
+      const m = ctx.measureText('Hg'), fa = m.fontBoundingBoxAscent, fd = m.fontBoundingBoxDescent;
+      lines.forEach((l, n) => ctx.fillText(l, rtl ? P + W : P, P + n * LH * S + (LH * S - fa - fd) / 2 + fa));
+      const img = await doc.embedPng(cv.toDataURL('image/png')), w = cv.width / K, h = cv.height / K;
+      const [x, y] = at(-P / K, h - P / K);
+      pg.drawImage(img, { x, y, width: w, height: h, rotate: rot });
+      return;
+    }
+    if (face !== 'helv') await ensureCssFace(face, !!it.bold);
+    const B = baselineOf(face, !!it.bold), size = it.size;
+    const runsOf = line => face !== 'vazir' ? [{ text: line }]
+      : bidiRuns(line, rtl).flatMap(r => !r.rtl && ARABIC.test(r.text) ? [...r.text].map(c => ({ text: c })) : [r]);   // e.g. Persian digits, left to right
+    const widthOf = runs => runs.reduce((w, r) => w + font.widthOfTextAtSize(r.text, size), 0);
+    const laid = lines.map(l => { const runs = runsOf(l); return { runs, w: widthOf(runs) }; });
+    const maxW = Math.max(0, ...laid.map(l => l.w));
+    laid.forEach(({ runs, w }, n) => {
+      let x = rtl ? maxW - w : 0;
+      for (const r of runs) {
+        const [px, py] = at(x, size * (B + n * LH));
+        if (r.text.trim()) pg.drawText(r.text, { x: px, y: py, size, font, color: col, rotate: rot });
+        x += font.widthOfTextAtSize(r.text, size);
+      }
+    });
   }
 
   /* ---------- signature dialog ---------- */
@@ -872,9 +1120,23 @@
 
   $('saveWork').onclick = () => {
     $('moreMenu').open = false;
-    download(new Blob([JSON.stringify({ app: 'fill-pdf', v: 1, file: fileName, pages: pages.length, rotations: pages.map(p => p.rot), items }, null, 1)], { type: 'application/json' }), baseName() + '.progress.json');
+    const fields = sources.map(s => s.doc.annotationStorage.getAll() || {});   // form field values, per source file
+    download(new Blob([JSON.stringify({ app: 'fill-pdf', v: 1, file: fileName, pages: pages.length, rotations: pages.map(p => p.rot), items, fields }, null, 1)], { type: 'application/json' }), baseName() + '.progress.json');
     toast('Progress saved. Load it later with the same PDF.');
   };
+  function restoreFields(all) {
+    const ok = v => typeof v === 'string' ? v.length <= 10000 : typeof v === 'boolean' || typeof v === 'number' || (Array.isArray(v) && v.length <= 500 && v.every(x => typeof x === 'string'));
+    sources.forEach((s, i) => {
+      const vals = all[i]; if (!vals || typeof vals !== 'object') return;
+      for (const [id, v] of Object.entries(vals).slice(0, 5000)) {
+        if (!/^\d+R$/.test(id) || !v || typeof v !== 'object') continue;
+        const clean = {}; for (const k of ['value', 'formattedValue']) if (k in v && ok(v[k])) clean[k] = v[k];
+        if ('value' in clean) s.doc.annotationStorage.setValue(id, clean);
+      }
+    });
+    pages.forEach(p => { if (p.ann) { p.annEl.textContent = ''; p.ann = null; p.annRot = null; } });
+    pump();
+  }
   $('loadWorkBtn').onclick = () => { $('moreMenu').open = false; $('loadWork').click(); };
   $('loadWork').onchange = async e => {
     const f = e.target.files[0]; e.target.value = ''; if (!f || !hasDoc()) return;
@@ -885,9 +1147,10 @@
       pushHistory(); items = loaded; nextId = items.length + 1; select(null);
       if (Array.isArray(d.rotations) && d.rotations.length === pages.length) {
         d.rotations.forEach((r, i) => { if ([0, 90, 180, 270].includes(r)) pages[i].rot = r; });
-        computeScale(); layout(); [...thumbList.children].forEach(t => thumbObserver && thumbObserver.observe(t));
+        computeScale(); layout();
       }
-      pages.forEach(p => redraw(p.n));
+      if (Array.isArray(d.fields) && d.fields.length === sources.length) restoreFields(d.fields);
+      redrawAll();
       toast(`Loaded ${items.length} item${items.length === 1 ? '' : 's'}.`);
       if ((d.file && d.file !== fileName) || (d.pages && d.pages !== pages.length)) toast('Loaded. Note: this progress file was saved for a different PDF or page order.', true);
     } catch { toast('That is not a valid progress file.', true); }
