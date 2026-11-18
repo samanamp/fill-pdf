@@ -10,13 +10,16 @@
   const ZOOMS = [0.5, 0.75, 1, 1.25, 1.5, 2, 3];
   const MAX_BYTES = 150 * 1024 * 1024, MAX_TOTAL = 300 * 1024 * 1024, MAX_PAGES = 500;
   const MIN_SIZE = 5, MAX_SIZE = 48;
-  const SIG_FONTS = ['Great Vibes', 'Allura', 'Dancing Script', 'Sacramento', 'Mrs Saint Delafield', 'Homemade Apple'];
+  const SIG_FONTS = ['Homemade Apple', 'La Belle Aurore', 'Cedarville Cursive', 'Nothing You Could Do', 'Zeyada', 'Dawning of a New Day'];
   const SIG_MIN = 8, SIG_MAX = 100, SIG_K = 4;       // SIG_K = render scale for crisp signatures
 
   /* ---------- state ---------- */
   let sources = [], nextSrc = 1, fileName = 'form.pdf';   // sources: {id, name, bytes, doc, password}
+  // Page sizes (w, h) and item positions are in the page's unrotated space (rotation 0, top-left origin, PDF units).
+  // rot = how the page is shown (0/90/180/270, clockwise); items turn with their page. ang = page rotation when an
+  // item was placed, so it reads upright then.
   let pages = [];                 // {n, el, canvas, layer, ghost, w, h, rot, page, src, idx, task, rendered}
-  let items = [];                 // {id, page, type, x, y, size, color, text}
+  let items = [];                 // {id, page, type, x, y, size, color, text, ang}
   let tool = 'text', color = 'black', size = 10, bold = false;
   let sig = null, signSize = 28, lastName = '';   // sig = {text, font} chosen in the dialog
   const sigCache = new Map();
@@ -37,6 +40,16 @@
   const hint = t => { $('hint').textContent = t; };
   const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
   const markBox = it => it.size * 1.15;
+  const dims = p => p.rot % 180 ? [p.h, p.w] : [p.w, p.h];          // displayed width, height (page units)
+  // vector (vx, vy) in an item's own frame -> unrotated page space, for an item turned by `a` degrees
+  function rotVec(vx, vy, a) {
+    const q = ((a || 0) / 90) & 3, c = [1, 0, -1, 0][q], s = [0, 1, 0, -1][q];
+    return [vx * c + vy * s, -vx * s + vy * c];
+  }
+  function toBase(p, cx, cy) {                 // screen point -> unrotated page space
+    const r = p.el.getBoundingClientRect(), [W, H] = dims(p), X = (cx - r.left) / scale, Y = (cy - r.top) / scale;
+    return p.rot === 90 ? [Y, W - X] : p.rot === 180 ? [W - X, H - Y] : p.rot === 270 ? [H - Y, X] : [X, Y];
+  }
   const svgNS = 'http://www.w3.org/2000/svg';
 
   function markSVG(type, px, col) {
@@ -104,7 +117,7 @@
   function activateTool(t) {
     tool = t; showSize(); document.body.classList.toggle('mode-select', t === 'select');
     document.querySelectorAll('#tools button').forEach(b => b.classList.toggle('on', b.dataset.tool === t));
-    pages.forEach(p => { p.layer.className = 'layer tool-' + t + (p.rot ? ' locked' : ''); p.ghost.style.display = 'none'; });
+    pages.forEach(p => { p.layer.className = 'layer tool-' + t; p.ghost.style.display = 'none'; });
     hint(HINTS[t]);
   }
   function setColor(c) {
@@ -158,8 +171,8 @@
   async function modelsFor(src) {                      // one page model per page of the source
     const out = [];
     for (let i = 0; i < src.doc.numPages; i++) {
-      const page = await src.doc.getPage(i + 1), vp = page.getViewport({ scale: 1 });
-      out.push({ n: 0, w: vp.width, h: vp.height, rot: page.rotate % 360, page, src, idx: i, task: null, rendered: 0 });
+      const page = await src.doc.getPage(i + 1), vp = page.getViewport({ scale: 1, rotation: 0 });
+      out.push({ n: 0, w: vp.width, h: vp.height, rot: ((page.rotate % 360) + 360) % 360, page, src, idx: i, task: null, rendered: 0 });
     }
     return out;
   }
@@ -178,7 +191,6 @@
     ['save', 'saveWork', 'loadWorkBtn', 'addBtn2', 'findBtn'].forEach(i => { $(i).disabled = false; });
     pages = models; renumber(); rebuildDom(); updateFileLabel();
     stage.scrollTo(0, 0); activateTool('text');
-    if (pages.some(p => p.rot)) toast('Some pages are rotated. Placing items on rotated pages is not supported.', true);
     try {                                              // XFA forms render as a "please wait" placeholder; warn the user
       const probe = await pdfjs.getDocument({ data: src.bytes.slice(), isEvalSupported: false, enableXfa: true }).promise;
       if (probe.isPureXfa) toast('This is a dynamic XFA form and cannot be filled here. Use the form’s printable PDF version.', true);
@@ -259,14 +271,17 @@
   function computeScale() {
     if (!fit || !pages.length) return;
     const avail = stage.clientWidth - (window.innerWidth <= 860 ? 16 : 44) - (stage.offsetWidth - stage.clientWidth);
-    const widest = Math.max(...pages.map(p => p.w));
+    const widest = Math.max(...pages.map(p => dims(p)[0]));
     scale = clamp(avail / widest, 0.4, 1.5);
   }
   function layout() {
     $('zoomFit').textContent = Math.round(scale * 100) + '%';
     $('zoomFit').title = fit ? 'Fit to width (on)' : 'Fit to width';
     pages.forEach(p => {
-      p.el.style.width = p.w * scale + 'px'; p.el.style.height = p.h * scale + 'px';
+      const [W, H] = dims(p).map(v => v * scale);
+      p.el.style.width = W + 'px'; p.el.style.height = H + 'px';
+      p.layer.style.width = p.w * scale + 'px'; p.layer.style.height = p.h * scale + 'px';   // unrotated, turned to fit
+      p.layer.style.transform = { 0: '', 90: `translate(${W}px,0) rotate(90deg)`, 180: `translate(${W}px,${H}px) rotate(180deg)`, 270: `translate(0,${H}px) rotate(270deg)` }[p.rot];
       p.textEl.textContent = '';                         // stale until the page is re-rendered
       p.rendered = 0; redraw(p.n);
     });
@@ -274,7 +289,7 @@
   }
   async function renderPage(p) {
     const stamp = ++p.rendered;                 // marks "render started"; layout() resets to 0
-    const vp = p.page.getViewport({ scale });
+    const vp = p.page.getViewport({ scale, rotation: p.rot });
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
     if (p.task) { try { p.task.cancel(); } catch { /* ignore */ } }
     const c = p.canvas;
@@ -331,7 +346,7 @@
       thumbObserver.unobserve(en.target);
       const p = pages[+en.target.dataset.n - 1]; if (!p) return;
       const c = en.target.querySelector('canvas');
-      const vp = p.page.getViewport({ scale: 110 / p.w });
+      const vp = p.page.getViewport({ scale: 110 / dims(p)[0], rotation: p.rot });
       c.width = Math.floor(vp.width); c.height = Math.floor(vp.height);
       try { await p.page.render({ canvasContext: c.getContext('2d'), viewport: vp }).promise; } catch { /* ignore */ }
     });
@@ -343,13 +358,13 @@
     w.className = 'thumb s' + (sources.indexOf(p.src) % 6); w.dataset.n = p.n; w.draggable = true;
     w.title = `${p.src.name} · page ${p.idx + 1}`;
     const go = document.createElement('button'); go.type = 'button'; go.className = 'thumb-go'; go.setAttribute('aria-label', 'Go to page ' + p.n);
-    const c = document.createElement('canvas'); c.width = 110; c.height = Math.round(110 * p.h / p.w); c.style.aspectRatio = `${p.w} / ${p.h}`;
+    const c = document.createElement('canvas'), [tw, th] = dims(p); c.width = 110; c.height = Math.round(110 * th / tw); c.style.aspectRatio = `${tw} / ${th}`;
     const s = document.createElement('span'); s.textContent = p.n;
     go.append(c, s);
     const del = document.createElement('button'); del.type = 'button'; del.className = 'thumb-del'; del.textContent = '×';
     del.title = 'Remove this page'; del.setAttribute('aria-label', 'Remove page ' + p.n);
     w.append(go, del); thumbList.appendChild(w);
-    go.onclick = () => { p.el.scrollIntoView({ block: 'start', behavior: 'smooth' }); };
+    go.onclick = () => { p.el.scrollIntoView({ block: 'start' }); };
     del.onclick = e => { e.stopPropagation(); removePage(p); };
     go.addEventListener('keydown', e => {              // keyboard reordering
       if (!e.altKey || (e.key !== 'ArrowUp' && e.key !== 'ArrowDown')) return;
@@ -418,6 +433,7 @@
       el.appendChild(markSVG(it.type, markBox(it) * scale, it.color));
     }
     const [ox, oy] = originOf(it); el.style.left = ox + 'px'; el.style.top = oy + 'px';
+    if (it.ang && it.type !== 'redact') { el.style.transform = `rotate(${-it.ang}deg)`; el.style.transformOrigin = it.type === 'text' ? '0 0' : '50% 50%'; }
     p.layer.appendChild(el); return el;
   }
   function select(id) {
@@ -464,7 +480,7 @@
     const L = p.layer;
     L.addEventListener('pointermove', e => {
       const ghostTool = tool === 'check' || tool === 'cross' || (tool === 'sign' && sig);
-      if (e.pointerType !== 'mouse' || !ghostTool || p.rot || e.target.closest('.item')) { p.ghost.style.display = 'none'; return; }
+      if (e.pointerType !== 'mouse' || !ghostTool || e.target.closest('.item')) { p.ghost.style.display = 'none'; return; }
       const r = L.getBoundingClientRect(); let w, h;
       p.ghost.textContent = '';
       if (tool === 'sign') {
@@ -482,20 +498,18 @@
       const target = e.target.closest('.item');
       if (target && target.isContentEditable) return;
       if (target) { if (e.target.classList.contains('rh')) startResize(e, p, target); else startDrag(e, p, target); return; }
-      if (p.rot) { toast('This page is rotated; placing items here is not supported.', true); return; }
       if (tool === 'select') { select(null); return; }
       if (tool === 'redact') { startRedactBox(e, p); return; }
       if (tool === 'sign' && !sig) { openSignDialog(); return; }
-      const r = L.getBoundingClientRect();
-      const x = (e.clientX - r.left) / scale, y = (e.clientY - r.top) / scale;
+      const [x, y] = toBase(p, e.clientX, e.clientY);
       pushHistory();
-      const it = { id: nextId++, page: p.n, type: tool, x, y, size, color, bold: tool === 'text' && bold, text: '' };
+      const it = { id: nextId++, page: p.n, type: tool, x, y, size, color, bold: tool === 'text' && bold, text: '', ang: p.rot };
       if (tool === 'sign') { it.text = sig.text; it.font = sig.font; it.size = signSize; it.bold = false; }
       items.push(it); selected = it.id;
       p.ghost.style.display = 'none';
       if (tool === 'text') {
-        // y is the top of the text; centre the first line on the click point
-        it.y = y - size * 0.5;
+        // (x, y) is the top-left of the text; centre the first line on the click point
+        const [dx, dy] = rotVec(0, size * 0.5, it.ang); it.x = x - dx; it.y = y - dy;
         redraw(p.n); const el = L.querySelector(`[data-id="${it.id}"]`); el.textContent = '';
         editText(it, el, true); e.preventDefault();
       } else { redraw(p.n); select(it.id); }
@@ -510,11 +524,11 @@
   function startDrag(e, p, target) {
     const it = itemById(+target.dataset.id);
     select(it.id);
-    const sx = e.clientX, sy = e.clientY, ox = it.x, oy = it.y; let moved = false;
+    const [sx, sy] = toBase(p, e.clientX, e.clientY), cx = e.clientX, cy = e.clientY, ox = it.x, oy = it.y; let moved = false;
     const place = () => { const [lx, ly] = originOf(it); target.style.left = lx + 'px'; target.style.top = ly + 'px'; };
     const move = ev => {
-      const dx = (ev.clientX - sx) / scale, dy = (ev.clientY - sy) / scale;
-      if (!moved && Math.hypot(dx, dy) * scale < 3) return;
+      const [bx, by] = toBase(p, ev.clientX, ev.clientY), dx = bx - sx, dy = by - sy;
+      if (!moved && Math.hypot(ev.clientX - cx, ev.clientY - cy) < 3) return;
       if (!moved) { pushHistory(); moved = true; }
       it.x = clamp(ox + dx, 0, p.w); it.y = clamp(oy + dy, 0, p.h); place();
     };
@@ -525,11 +539,11 @@
 
   /* ---------- redaction boxes ---------- */
   function startRedactBox(e, p) {
-    const r = p.layer.getBoundingClientRect(), sx = (e.clientX - r.left) / scale, sy = (e.clientY - r.top) / scale;
+    const [sx, sy] = toBase(p, e.clientX, e.clientY);
     const band = document.createElement('div'); band.className = 'rband'; p.layer.appendChild(band);
     let box = null;
     const move = ev => {
-      const x = clamp((ev.clientX - r.left) / scale, 0, p.w), y = clamp((ev.clientY - r.top) / scale, 0, p.h);
+      const [bx, by] = toBase(p, ev.clientX, ev.clientY), x = clamp(bx, 0, p.w), y = clamp(by, 0, p.h);
       box = { x: Math.min(sx, x), y: Math.min(sy, y), w: Math.abs(x - sx), h: Math.abs(y - sy) };
       Object.assign(band.style, { left: box.x * scale + 'px', top: box.y * scale + 'px', width: box.w * scale + 'px', height: box.h * scale + 'px' });
     };
@@ -546,10 +560,11 @@
   }
   function startResize(e, p, target) {
     const it = itemById(+target.dataset.id); select(it.id);
-    const sx = e.clientX, sy = e.clientY, ow = it.w, oh = it.h; let moved = false;
+    const [sx, sy] = toBase(p, e.clientX, e.clientY), ow = it.w, oh = it.h; let moved = false;
     const move = ev => {
       if (!moved) { pushHistory(); moved = true; }
-      it.w = clamp(ow + (ev.clientX - sx) / scale, 2, p.w - it.x); it.h = clamp(oh + (ev.clientY - sy) / scale, 2, p.h - it.y);
+      const [bx, by] = toBase(p, ev.clientX, ev.clientY);
+      it.w = clamp(ow + bx - sx, 2, p.w - it.x); it.h = clamp(oh + by - sy, 2, p.h - it.y);
       target.style.width = it.w * scale + 'px'; target.style.height = it.h * scale + 'px';
     };
     const up = () => { removeEventListener('pointermove', move); removeEventListener('pointerup', up); removeEventListener('pointercancel', up); };
@@ -569,7 +584,7 @@
     if (q.length < 2) return [];
     const out = [];
     for (const p of pages) {
-      const its = await pageText(p), vp = p.page.getViewport({ scale: 1 });
+      const its = await pageText(p), vp = p.page.getViewport({ scale: 1, rotation: 0 });
       let norm = ''; const map = [];                // map[k] = [item index, char index] for each normalised char
       its.forEach((it, ii) => [...it.str].forEach((ch, ci) => {
         if (SKIP.test(ch)) return;
@@ -626,7 +641,7 @@
     findResults.forEach(r => { items.push({ id: nextId++, type: 'redact', size: 0, color: 'black', text: '', ...r }); touched.add(r.page); });
     touched.forEach(redraw); $('findDialog').close();
     if (tool !== 'redact') activateTool('redact');
-    const first = Math.min(...touched); pages[first - 1].el.scrollIntoView({ block: 'start', behavior: 'smooth' });
+    const first = Math.min(...touched); pages[first - 1].el.scrollIntoView({ block: 'start' });
     toast(`Added ${findResults.length} redaction${findResults.length === 1 ? '' : 's'}. Check them, then Save PDF.`);
   }
   $('findInput').addEventListener('input', () => { clearTimeout(findTimer); findTimer = setTimeout(runFind, 200); });
@@ -651,6 +666,22 @@
     const it = itemById(selected); if (!it) return;
     pushHistory(); it.x += dx; it.y += dy; redraw(it.page);
   }
+
+  /* ---------- page rotation ---------- */
+  function rotatePage(d) {
+    const p = pages[curPage - 1]; if (!p) return;
+    p.rot = (p.rot + d + 360) % 360; dirty = true;
+    computeScale(); layout();
+    const t = thumbList.children[p.n - 1];
+    if (t) {                                           // re-render its thumbnail at the new shape
+      const c = t.querySelector('canvas'), [tw, th] = dims(p);
+      c.width = 110; c.height = Math.round(110 * th / tw); c.style.aspectRatio = `${tw} / ${th}`;
+      thumbObserver && thumbObserver.observe(t);
+    }
+    p.el.scrollIntoView({ block: 'nearest' });
+    hint(`Page ${p.n} rotated. Items on it turn with the page. Save PDF to keep the change.`);
+  }
+  $('rotL').onclick = () => rotatePage(-90); $('rotR').onclick = () => rotatePage(90);
 
   /* ---------- zoom ---------- */
   function stepZoom(dir) {
@@ -681,12 +712,12 @@
       }
       const x = +i.x, y = +i.y, sz = +i.size;
       if (![x, y, sz].every(Number.isFinite)) continue;
-      if (i.type === 'sign' && (!SIG_FONTS.includes(i.font) || !String(i.text ?? '').trim())) continue;
-      const isSign = i.type === 'sign';
+      if (i.type === 'sign' && !String(i.text ?? '').trim()) continue;
+      const isSign = i.type === 'sign', ang = [0, 90, 180, 270].includes(+i.ang) ? +i.ang : 0;
       out.push({ id: out.length + 1, page, type: i.type, x, y, size: isSign ? clamp(sz, SIG_MIN, SIG_MAX) : clamp(sz, MIN_SIZE, MAX_SIZE),
         color: COLORS[i.color] ? i.color : 'black', bold: i.type === 'text' && i.bold === true,
         text: i.type === 'text' ? String(i.text ?? '').slice(0, 500) : isSign ? String(i.text).slice(0, 40) : '',
-        ...(isSign ? { font: i.font } : {}) });
+        ang, ...(isSign ? { font: SIG_FONTS.includes(i.font) ? i.font : SIG_FONTS[0] } : {}) });   // old styles -> default
     }
     return out;
   }
@@ -694,7 +725,7 @@
   /* ---------- export ---------- */
   async function savePdf() {
     if (!hasDoc()) return;
-    const { PDFDocument, StandardFonts, rgb, LineCapStyle } = PDFLib;
+    const { PDFDocument, StandardFonts, rgb, degrees, LineCapStyle } = PDFLib;
     const btn = $('save'); btn.disabled = true; btn.textContent = 'Saving…';
     try {
       // Redactions need the rebuild path: it only copies objects the (rewritten) pages still use,
@@ -703,7 +734,7 @@
       for (const it of items) {
         if (it.type !== 'redact') continue;
         const p = pages[it.page - 1]; if (!p) continue;
-        const vp = p.page.getViewport({ scale: 1 });
+        const vp = p.page.getViewport({ scale: 1, rotation: 0 });
         const [ax, ay] = vp.convertToPdfPoint(it.x, it.y), [bx, by] = vp.convertToPdfPoint(it.x + it.w, it.y + it.h);
         if (!redRects.has(p)) redRects.set(p, []);
         redRects.get(p).push([Math.min(ax, bx), Math.min(ay, by), Math.max(ax, bx), Math.max(ay, by)]);
@@ -734,25 +765,28 @@
       const font = await doc.embedFont(StandardFonts.Helvetica);
       const fontBold = await doc.embedFont(StandardFonts.HelveticaBold);
       const pgs = doc.getPages(); let replaced = false;
+      pages.forEach((p, i) => pgs[i].setRotation(degrees(p.rot)));
       if (items.some(i => i.type === 'sign')) await loadFonts();
       const sigImgs = new Map();
       const safe = s => [...s].map(ch => { try { font.encodeText(ch); return ch; } catch { replaced = true; return '?'; } }).join('');
       for (const it of items) {
-        const pg = pgs[it.page - 1]; if (!pg) continue;
-        const H = pg.getHeight(), col = rgb(...(COLORS[it.color] || COLORS.black));
-        if (it.type === 'redact') continue;
+        const pg = pgs[it.page - 1], p = pages[it.page - 1]; if (!pg || !p || it.type === 'redact') continue;
+        const col = rgb(...(COLORS[it.color] || COLORS.black)), a = it.ang || 0, vp0 = p.page.getViewport({ scale: 1, rotation: 0 });
+        const at = (lx, ly) => { const [vx, vy] = rotVec(lx, ly, a); return vp0.convertToPdfPoint(it.x + vx, it.y + vy); };  // item frame -> PDF
         if (it.type === 'sign') {
           const c = sigImage(it);
           if (!sigImgs.has(c.url)) sigImgs.set(c.url, await doc.embedPng(c.url));
-          pg.drawImage(sigImgs.get(c.url), { x: it.x - c.w / 2, y: H - it.y - c.h / 2, width: c.w, height: c.h });
+          const [x, y] = at(-c.w / 2, c.h / 2);           // bottom-left corner of the image
+          pg.drawImage(sigImgs.get(c.url), { x, y, width: c.w, height: c.h, rotate: degrees(a) });
         } else if (it.type === 'text') {
           safe(it.text).split('\n').forEach((line, n) => {
             if (!line) return;
-            pg.drawText(line, { x: it.x, y: H - it.y - it.size * 0.82 - n * it.size * 1.15, size: it.size, font: it.bold ? fontBold : font, color: col });
+            const [x, y] = at(0, it.size * 0.82 + n * it.size * 1.15);
+            pg.drawText(line, { x, y, size: it.size, font: it.bold ? fontBold : font, color: col, rotate: degrees(a) });
           });
         } else {
-          const b = markBox(it), x0 = it.x - b / 2, y0 = it.y - b / 2, k = b / 10;
-          const P = (px, py) => ({ x: x0 + px * k, y: H - (y0 + py * k) });
+          const b = markBox(it), k = b / 10;
+          const P = (px, py) => { const [x, y] = at(px * k - b / 2, py * k - b / 2); return { x, y }; };
           const seg = (a, c) => pg.drawLine({ start: P(...a), end: P(...c), thickness: 1.25 * k, color: col, lineCap: LineCapStyle.Round });
           if (it.type === 'check') { seg([1.2, 5.4], [4, 8.2]); seg([4, 8.2], [8.8, 1.6]); }
           else { seg([1.5, 1.5], [8.5, 8.5]); seg([8.5, 1.5], [1.5, 8.5]); }
@@ -838,7 +872,7 @@
 
   $('saveWork').onclick = () => {
     $('moreMenu').open = false;
-    download(new Blob([JSON.stringify({ app: 'fill-pdf', v: 1, file: fileName, pages: pages.length, items }, null, 1)], { type: 'application/json' }), baseName() + '.progress.json');
+    download(new Blob([JSON.stringify({ app: 'fill-pdf', v: 1, file: fileName, pages: pages.length, rotations: pages.map(p => p.rot), items }, null, 1)], { type: 'application/json' }), baseName() + '.progress.json');
     toast('Progress saved. Load it later with the same PDF.');
   };
   $('loadWorkBtn').onclick = () => { $('moreMenu').open = false; $('loadWork').click(); };
@@ -849,6 +883,10 @@
       const d = JSON.parse(await f.text());
       const loaded = cleanItems(d.items); await loadFonts();
       pushHistory(); items = loaded; nextId = items.length + 1; select(null);
+      if (Array.isArray(d.rotations) && d.rotations.length === pages.length) {
+        d.rotations.forEach((r, i) => { if ([0, 90, 180, 270].includes(r)) pages[i].rot = r; });
+        computeScale(); layout(); [...thumbList.children].forEach(t => thumbObserver && thumbObserver.observe(t));
+      }
       pages.forEach(p => redraw(p.n));
       toast(`Loaded ${items.length} item${items.length === 1 ? '' : 's'}.`);
       if ((d.file && d.file !== fileName) || (d.pages && d.pages !== pages.length)) toast('Loaded. Note: this progress file was saved for a different PDF or page order.', true);
@@ -867,6 +905,7 @@
     if (mod || e.altKey || !hasDoc()) return;
     if (e.key === 'Delete' || e.key === 'Backspace') { if (selected != null) { e.preventDefault(); deleteSel(); } return; }
     if (e.key === 'Escape') { select(null); return; }
+    if (e.key === '[' || e.key === ']') { e.preventDefault(); rotatePage(e.key === ']' ? 90 : -90); return; }
     if (selected != null && e.key.startsWith('Arrow')) {
       const st = e.shiftKey ? 5 : 1;
       const d = { ArrowLeft: [-st, 0], ArrowRight: [st, 0], ArrowUp: [0, -st], ArrowDown: [0, st] }[e.key];

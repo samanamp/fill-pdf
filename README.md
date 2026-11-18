@@ -27,4 +27,5 @@ Security headers (CSP etc.) are in `_headers`.
 - Redaction limits: images (scans) under a box are covered but not altered, and the app warns when that happens. Text drawn as vector outlines is not detected. If a form XObject (e.g. a repeated header) is redacted, the same text disappears wherever else it is drawn.
 - Encrypted PDFs (`decrypt.js`): restricted or password-protected files (RC4, AES-128, AES-256) are decrypted in the browser when saving, and the saved copy has no encryption or restrictions. The open password is asked for once when the file is opened. Certificate-based (public key) encryption is not supported.
 - pdf.js runs with `isEvalSupported:false` (mitigates CVE-2024-4367). Upgrade to >= 4.2.67 when convenient.
-- Plain PDFs only (not XFA), unrotated pages, standard Helvetica text (WinAnsi characters).
+- Page rotation: items are stored in the page's unrotated coordinates with the angle they were placed at, so they turn with the page (like ink on paper), and new items are always upright on screen.
+- Plain PDFs only (not XFA), standard Helvetica text (WinAnsi characters).

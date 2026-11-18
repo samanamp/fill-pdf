@@ -1,9 +1,9 @@
-@font-face { font-family: "Great Vibes"; src: url("fonts/great-vibes.woff2") format("woff2"); font-weight: 400; font-style: normal; font-display: swap; }
-@font-face { font-family: "Allura"; src: url("fonts/allura.woff2") format("woff2"); font-weight: 400; font-style: normal; font-display: swap; }
-@font-face { font-family: "Dancing Script"; src: url("fonts/dancing-script.woff2") format("woff2"); font-weight: 400; font-style: normal; font-display: swap; }
-@font-face { font-family: "Sacramento"; src: url("fonts/sacramento.woff2") format("woff2"); font-weight: 400; font-style: normal; font-display: swap; }
-@font-face { font-family: "Mrs Saint Delafield"; src: url("fonts/mrs-saint-delafield.woff2") format("woff2"); font-weight: 400; font-style: normal; font-display: swap; }
 @font-face { font-family: "Homemade Apple"; src: url("fonts/homemade-apple.woff2") format("woff2"); font-weight: 400; font-style: normal; font-display: swap; }
+@font-face { font-family: "La Belle Aurore"; src: url("fonts/la-belle-aurore.woff2") format("woff2"); font-weight: 400; font-style: normal; font-display: swap; }
+@font-face { font-family: "Cedarville Cursive"; src: url("fonts/cedarville-cursive.woff2") format("woff2"); font-weight: 400; font-style: normal; font-display: swap; }
+@font-face { font-family: "Nothing You Could Do"; src: url("fonts/nothing-you-could-do.woff2") format("woff2"); font-weight: 400; font-style: normal; font-display: swap; }
+@font-face { font-family: "Zeyada"; src: url("fonts/zeyada.woff2") format("woff2"); font-weight: 400; font-style: normal; font-display: swap; }
+@font-face { font-family: "Dawning of a New Day"; src: url("fonts/dawning-of-a-new-day.woff2") format("woff2"); font-weight: 400; font-style: normal; font-display: swap; }
 :root {
   --bg: #eef0f4; --panel: #ffffff; --panel2: #f6f7f9; --ink: #1b2130; --muted: #646d7e;
   --line: #d9dde5; --accent: #2457d6; --accent-ink: #fff; --accent-soft: #e6edff;
@@ -95,7 +95,7 @@ body.loaded #thumbs { display: block; }
 #pages { display: flex; flex-direction: column; align-items: center; gap: 18px; padding: 22px 22px 120px; width: max-content; min-width: 100%; }
 .page { position: relative; flex: none; background: #fff; box-shadow: var(--shadow); }
 .page canvas { display: block; width: 100%; height: 100%; }
-.layer { position: absolute; inset: 0; touch-action: pan-y pan-x; }
+.layer { position: absolute; left: 0; top: 0; transform-origin: 0 0; touch-action: pan-y pan-x; }
 .layer.tool-text { cursor: text; }
 .layer.tool-check, .layer.tool-cross { cursor: crosshair; }
 .layer.tool-select { cursor: default; pointer-events: none; }
@@ -107,7 +107,6 @@ body.loaded #thumbs { display: block; }
 .textLayer span, .textLayer br { color: transparent; position: absolute; white-space: pre; cursor: text; transform-origin: 0% 0%; }
 .textLayer ::selection { background: rgba(36, 87, 214, .35); color: transparent; }
 body.mode-select .textLayer { pointer-events: auto; user-select: text; -webkit-user-select: text; }
-.layer.locked { cursor: not-allowed; }
 .page .num { position: absolute; left: 50%; bottom: -17px; transform: translateX(-50%); font-size: 11px; color: var(--muted); pointer-events: none; }
 
 .item { position: absolute; user-select: none; -webkit-user-select: none; cursor: move; white-space: pre;
