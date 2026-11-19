@@ -110,7 +110,9 @@
     select: 'Select text to copy it (Ctrl+C), or drag items to move them. Double-click your text to edit.',
     redact: 'Drag a box over text to black it out. The text under it is deleted from the saved PDF. F = find & redact.'
   };
+  const XFA_REDACT = 'Redaction is not available for dynamic (XFA) forms: their content is rebuilt by the reader.';
   function setTool(t) {                        // user-facing: the Sign tool opens the dialog first
+    if (t === 'redact' && xfaDoc()) { toast(XFA_REDACT, true); return; }
     if (t === 'sign' && (!sig || tool === 'sign')) { openSignDialog(); return; }
     activateTool(t);
   }
@@ -155,7 +157,7 @@
     try { bytes = new Uint8Array(await file.arrayBuffer()); } catch { toast('Could not read ' + file.name + '.', true); return null; }
     if (String.fromCharCode(...bytes.slice(0, 5)) !== '%PDF-') { toast(file.name + ' does not look like a PDF file.', true); return null; }
     try {
-      const task = pdfjs.getDocument({ data: bytes.slice(), isEvalSupported: false, enableXfa: false });
+      const task = pdfjs.getDocument({ data: bytes.slice(), isEvalSupported: false, enableXfa: true });
       let password = '';
       task.onPassword = (update, reason) => {         // kept so the file can be decrypted when saving
         const pw = prompt(reason === pdfjs.PasswordResponses.INCORRECT_PASSWORD
@@ -164,7 +166,7 @@
         update(password = pw);
       };
       const doc = await task.promise;
-      return { id: nextSrc++, name: file.name || 'document.pdf', bytes, doc, password };
+      return { id: nextSrc++, name: file.name || 'document.pdf', bytes, doc, password, xfa: !!doc.isPureXfa };
     } catch (e) {
       toast(e && e.name === 'PasswordException' ? file.name + ' is password-protected and cannot be opened.' : 'Could not open ' + file.name + '.', true);
       return null;
@@ -174,7 +176,7 @@
     const all = await Promise.all(Array.from({ length: src.doc.numPages }, (_, i) => src.doc.getPage(i + 1)));
     return all.map((page, i) => {
       const vp = page.getViewport({ scale: 1, rotation: 0 }), rot = ((page.rotate % 360) + 360) % 360;
-      return { n: 0, w: vp.width, h: vp.height, rot, page, src, idx: i, task: null, drawn: null };
+      return { n: 0, w: vp.width, h: vp.height, rot: src.xfa ? 0 : rot, page, src, idx: i, task: null, drawn: null, xfa: src.xfa };
     });
   }
 
@@ -190,25 +192,25 @@
     items = []; history = []; selected = null; nextId = 1; dirty = false; curPage = 1;
     $('undo').disabled = true; $('del').disabled = true;
     document.body.classList.add('loaded'); $('toolbar').hidden = false;
-    ['save', 'saveWork', 'loadWorkBtn', 'addBtn2', 'findBtn'].forEach(i => { $(i).disabled = false; });
+    ['save', 'saveWork', 'loadWorkBtn', 'addBtn2', 'findBtn', 'printBtn'].forEach(i => { $(i).disabled = false; });
     pages = models; renumber(); rebuildDom(); updateFileLabel();
     stage.scrollTo(0, 0); activateTool('text');
-    try {                                              // dynamic XFA forms show only a "please wait" page
-      const { info } = await src.doc.getMetadata();
-      if (info && info.IsXFAPresent && !(await fieldObjects(src))) toast('This is a dynamic XFA form and cannot be filled here. Use the form’s printable PDF version.', true);
-      else if (await fieldObjects(src)) hint('This PDF has form fields: click a field (or press Tab) to fill it in.');
-    } catch { /* ignore */ }
+    document.body.classList.toggle('xfa', src.xfa);
+    if (src.xfa) hint('Dynamic (XFA) form: fill in its fields here. Its own buttons, like Validate, need Adobe Reader.');
+    else if (await fieldObjects(src)) hint('This PDF has form fields: click a field (or press Tab) to fill it in.');
   }
 
   async function addPdfs(files, at = pages.length) {   // inserts the pages of one or more PDFs at position `at`
     files = [...files].filter(isPdf);
     if (!files.length) { toast('Please choose PDF files.', true); return; }
     if (!hasDoc()) { await openPdf(files[0]); files = files.slice(1); at = pages.length; if (!files.length) return; }
+    if (xfaDoc()) { toast(XFA_PAGES, true); return; }
     let pos = clamp(at, 0, pages.length), added = 0;
     for (const f of files) {
       const total = sources.reduce((s, x) => s + x.bytes.length, 0) + f.size;
       if (total > MAX_TOTAL) { toast('The combined files are too large (limit 300 MB).', true); break; }
       const src = await readPdf(f); if (!src) continue;
+      if (src.xfa) { toast(XFA_PAGES, true); src.doc.destroy(); continue; }
       if (pages.length + src.doc.numPages > MAX_PAGES) { toast(`Too many pages (limit ${MAX_PAGES}).`, true); src.doc.destroy(); break; }
       const models = await modelsFor(src);
       sources.push(src);
@@ -219,6 +221,9 @@
   }
 
   const renumber = () => pages.forEach((p, i) => { p.n = i + 1; });
+  // Dynamic XFA forms are laid out by the form itself: their pages cannot be moved, removed, rotated or combined.
+  const xfaDoc = () => sources.some(s => s.xfa);
+  const XFA_PAGES = 'This is a dynamic (XFA) form: its pages can’t be rotated, moved, removed or combined with other PDFs.';
   // Apply a new page list (reordered / added / removed). Items follow their pages; items on removed pages go.
   function restructure(list) {
     const old = pages, pos = new Map(list.map((p, i) => [p, i + 1])), keep = new Set(list);
@@ -232,11 +237,13 @@
   }
   function moveTo(from, idx) {                         // idx = insertion slot (0..pages.length) in the current order
     if (idx === from || idx === from + 1) return;
+    if (xfaDoc()) { toast(XFA_PAGES, true); return; }
     const list = pages.slice(), [m] = list.splice(from, 1); list.splice(idx > from ? idx - 1 : idx, 0, m);
     restructure(list);
   }
   function removePage(p) {
     if (pages.length === 1) { toast('A document needs at least one page.', true); return; }
+    if (xfaDoc()) { toast(XFA_PAGES, true); return; }
     const n = items.filter(i => i.page === p.n).length;
     if (n && !confirm(`Remove page ${p.n}? Its ${n} item${n === 1 ? '' : 's'} will be removed too.`)) return;
     restructure(pages.filter(x => x !== p));
@@ -257,7 +264,7 @@
     const el = document.createElement('div'); el.className = 'page'; el._p = p;
     const canvas = document.createElement('canvas'); canvas.width = canvas.height = 0;   // no pixels until drawn
     const textEl = document.createElement('div'); textEl.className = 'textLayer';
-    const annEl = document.createElement('div'); annEl.className = 'annotationLayer';
+    const annEl = document.createElement('div'); annEl.className = p.xfa ? 'xfaLayer' : 'annotationLayer';
     const layer = document.createElement('div'); layer.className = 'layer';
     const ghost = document.createElement('div'); ghost.className = 'ghost';
     const num = document.createElement('div'); num.className = 'num';
@@ -331,7 +338,7 @@
     const sr = stage.getBoundingClientRect(), mid = (sr.top + sr.bottom) / 2;
     let best = null, bestD = Infinity, kind = null;
     for (const p of near) {
-      const want = p.drawn !== keyOf(p) ? 'draw' : p.annRot === null ? 'form' : p.ann && p.annRot !== p.rot ? 'form'
+      const want = p.xfa ? (p.xfaKey !== scale ? 'xfa' : null) : p.drawn !== keyOf(p) ? 'draw' : p.annRot === null ? 'form' : p.ann && p.annRot !== p.rot ? 'form'
         : document.body.classList.contains('mode-select') && p.textRot !== p.rot + '|' + scale ? 'text' : null;
       if (!want) continue;
       const r = p.el.getBoundingClientRect(), d = r.bottom < mid ? mid - r.bottom : r.top > mid ? r.top - mid : 0;
@@ -351,6 +358,7 @@
     const [kind, p] = job;
     try {
       if (kind === 'draw') await drawPage(p);
+      else if (kind === 'xfa') await buildXfa(p);
       else if (kind === 'form') await buildForm(p);
       else if (kind === 'text') await buildText(p);
       else await drawThumb(p);
@@ -400,9 +408,22 @@
     await p.ann.render({ annotations: annots, linkService: NO_LINKS, renderForms: true, annotationStorage: storage,
       imageResourcesPath: '', downloadManager: null, enableScripting: false, hasJSActions: false, fieldObjects: await fieldObjects(p.src) });
   }
+  /* ---------- dynamic XFA forms: pdf.js lays the form out as HTML; values go to the same annotation storage ---------- */
+  async function buildXfa(p) {
+    const vp = p.page.getViewport({ scale, rotation: 0 }).clone({ dontFlip: true });
+    if (p.xfaKey != null) { pdfjs.XfaLayer.update({ viewport: vp, div: p.annEl }); p.xfaKey = scale; return; }
+    p.xfaKey = scale;
+    const storage = p.src.doc.annotationStorage;
+    if (!storage.onSetModified) storage.onSetModified = () => { dirty = true; };
+    const xfaHtml = await p.page.getXfa(); if (!xfaHtml) return;
+    pdfjs.XfaLayer.render({ viewport: vp, div: p.annEl, xfaHtml, annotationStorage: storage, linkService: NO_LINKS, intent: 'display' });
+    p.ann = true;                                      // has fields (for the pointer hand-over)
+    if (p.thumbRot == null) drawThumb(p);
+  }
   const fieldAt = (x, y) => {                          // a form input under a screen point, if any
     for (const el of document.elementsFromPoint(x, y)) {
       if (el.closest('.layer')) continue;
+      if (el.matches('input, textarea, select') && el.closest('.xfaLayer')) return el;
       const sec = el.closest('.annotationLayer section'); if (!sec) continue;
       return sec.querySelector('input, textarea, select') || null;
     }
@@ -454,6 +475,11 @@
   }
   async function drawThumb(p) {
     thumbWant.delete(p); p.thumbRot = p.rot; sizeThumb(p);
+    if (p.xfa) {                                       // XFA pages are HTML: a plain sheet with a hint of lines
+      const c = p.thumbCanvas, g = c.getContext('2d'); g.fillStyle = '#fff'; g.fillRect(0, 0, c.width, c.height);
+      g.fillStyle = '#d5dae3'; for (let y = 14; y < c.height - 10; y += 9) g.fillRect(10, y, (y * 37) % 50 + 40, 3);
+      return;
+    }
     const vp = p.page.getViewport({ scale: 110 / dims(p)[0], rotation: p.rot });
     await p.page.render({ canvasContext: p.thumbCanvas.getContext('2d', { alpha: false }), viewport: vp }).promise;
   }
@@ -668,7 +694,7 @@
     addEventListener('pointermove', unpass, { passive: true });
   }
   function unpass(e) {
-    if (e.target.closest && e.target.closest('.annotationLayer section')) return;
+    if (e.target.closest && (e.target.closest('.annotationLayer section') || (e.target.matches('input, textarea, select') && e.target.closest('.xfaLayer')))) return;
     if (passL) passL.classList.remove('pass');
     passL = null; removeEventListener('pointermove', unpass);
   }
@@ -828,6 +854,7 @@
   let findTimer, findResults = [], findSeq = 0;
   function openFind() {
     if (!hasDoc()) { toast('Open a PDF first.', true); return; }
+    if (xfaDoc()) { toast(XFA_REDACT, true); return; }
     $('moreMenu').open = false; $('findMsg').textContent = 'Type the text to find, e.g. your SIN.'; $('findGo').disabled = true;
     $('findDialog').showModal(); $('findInput').focus(); $('findInput').select();
     if ($('findInput').value) runFind();
@@ -878,6 +905,7 @@
   /* ---------- page rotation ---------- */
   function rotatePage(d) {
     const p = pages[curPage - 1]; if (!p) return;
+    if (p.xfa) { toast(XFA_PAGES, true); return; }
     p.rot = (p.rot + d + 360) % 360; dirty = true;
     computeScale(); layout();                          // the picture, thumbnail, text and form layers follow
     p.el.scrollIntoView({ block: 'nearest' });
@@ -925,8 +953,48 @@
   }
 
   /* ---------- export ---------- */
+  /* ---------- saving dynamic XFA forms ---------- */
+  // pdf.js writes the values into the form's XFA data, so the file stays the official, fillable form (Adobe Reader
+  // validates and prints it). Items we drew can't live in an XFA form; printing to PDF gives a flat copy with them.
+  async function saveXfa() {
+    if (items.length) { $('xfaDialog').showModal(); return; }
+    await downloadXfa();
+  }
+  async function downloadXfa() {
+    const btn = $('save'); btn.disabled = true; btn.textContent = 'Saving…';
+    try {
+      const out = await sources[0].doc.saveDocument();
+      download(new Blob([out], { type: 'application/pdf' }), baseName() + '-filled.pdf');
+      if (!items.length) dirty = false;
+      toast('Saved the filled form. It is still a dynamic (XFA) form: use Adobe Acrobat Reader to validate or print it.');
+    } catch (e) { console.error(e); toast('Could not save this form.', true); }
+    finally { btn.disabled = false; btn.textContent = 'Save PDF'; }
+  }
+  let printSheet = null;
+  async function printFlat() {                         // the browser's print dialog -> "Save as PDF"
+    const keep = { scale, fit };
+    select(null); fit = false; scale = 4 / 3;          // 1 PDF point = 1 CSS point on paper
+    layout();
+    for (const p of pages) if (p.xfa) await buildXfa(p);
+    const first = pages[0];
+    if ('adoptedStyleSheets' in document) {
+      if (!printSheet) { printSheet = new CSSStyleSheet(); document.adoptedStyleSheets = [...document.adoptedStyleSheets, printSheet]; }
+      printSheet.replaceSync(`@page { size: ${first.w}pt ${first.h}pt; margin: 0; }`);
+    }
+    document.body.classList.add('printing');
+    try { window.print(); } finally {
+      document.body.classList.remove('printing');
+      scale = keep.scale; fit = keep.fit; computeScale(); layout();
+    }
+  }
+  $('xfaSave').onclick = () => { $('xfaDialog').close(); downloadXfa(); };
+  $('xfaPrint').onclick = () => { $('xfaDialog').close(); printFlat(); };
+  $('xfaCancel').onclick = () => $('xfaDialog').close();
+  $('printBtn').onclick = () => { $('moreMenu').open = false; printFlat(); };
+
   async function savePdf() {
     if (!hasDoc()) return;
+    if (xfaDoc()) { await saveXfa(); return; }
     const { PDFDocument, StandardFonts, rgb, degrees, LineCapStyle } = PDFLib;
     const btn = $('save'); btn.disabled = true; btn.textContent = 'Saving…';
     try {
@@ -972,6 +1040,9 @@
       }
       const pgs = doc.getPages();
       pages.forEach((p, i) => pgs[i].setRotation(degrees(p.rot)));
+      // static XFA forms carry a second copy of the data that Adobe prefers; drop it so every reader shows these values
+      const acro = doc.catalog.lookup(PDFLib.PDFName.of('AcroForm'));
+      if (acro instanceof PDFLib.PDFDict && acro.has(PDFLib.PDFName.of('XFA'))) acro.delete(PDFLib.PDFName.of('XFA'));
       if (items.some(i => i.type === 'sign')) await loadFonts();
       const sigImgs = new Map(), fonts = new Map();
       const pdfFont = (face, b) => {                   // embedded once per document, on first use
@@ -1129,12 +1200,12 @@
     sources.forEach((s, i) => {
       const vals = all[i]; if (!vals || typeof vals !== 'object') return;
       for (const [id, v] of Object.entries(vals).slice(0, 5000)) {
-        if (!/^\d+R$/.test(id) || !v || typeof v !== 'object') continue;
+        if (!/^[\w.:-]{1,100}$/.test(id) || !v || typeof v !== 'object') continue;
         const clean = {}; for (const k of ['value', 'formattedValue']) if (k in v && ok(v[k])) clean[k] = v[k];
         if ('value' in clean) s.doc.annotationStorage.setValue(id, clean);
       }
     });
-    pages.forEach(p => { if (p.ann) { p.annEl.textContent = ''; p.ann = null; p.annRot = null; } });
+    pages.forEach(p => { if (p.ann) { p.annEl.textContent = ''; p.ann = null; p.annRot = null; p.xfaKey = null; } });
     pump();
   }
   $('loadWorkBtn').onclick = () => { $('moreMenu').open = false; $('loadWork').click(); };
@@ -1160,7 +1231,7 @@
   addEventListener('keydown', e => {
     const ae = document.activeElement;
     if (ae && (ae.isContentEditable || ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA')) return;
-    if ($('shortcuts').open || $('signDialog').open || $('dropDialog').open || $('findDialog').open) return;
+    if ([...document.querySelectorAll('dialog')].some(d => d.open)) return;
     const mod = e.ctrlKey || e.metaKey, k = e.key.toLowerCase();
     if (mod && k === 'z') { e.preventDefault(); undo(); return; }
     if (mod && k === 's') { e.preventDefault(); savePdf(); return; }

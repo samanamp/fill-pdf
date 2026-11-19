@@ -29,6 +29,7 @@
       <div class="menu-pop">
         <button id="addBtn2" disabled>Add pages from another PDF…</button>
         <button id="findBtn" disabled>Find and redact text… <kbd>F</kbd></button>
+        <button id="printBtn" disabled>Print or save as a flat PDF…</button>
         <hr>
         <button id="saveWork" disabled>Save progress to a file</button>
         <button id="loadWorkBtn" disabled>Load progress from a file</button>
@@ -60,7 +61,7 @@
           <li><b>Private.</b> The file stays in your browser and is never uploaded.</li>
           <li><b>Real redaction.</b> Black out text like your SIN; it is deleted from the saved file, not just hidden.</li>
         </ul>
-        <p class="fine">Dynamic “XFA” forms (some government forms) can't be shown here; use their printable version.</p>
+        <p class="fine">Dynamic “XFA” forms (many government forms) work too. Their own buttons, such as Validate, need Adobe Reader.</p>
       </div>
     </section>
 
@@ -99,7 +100,7 @@
         <button id="undo" class="sq" disabled title="Undo (Ctrl+Z)" aria-label="Undo"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M7.5 5.5 4 9l3.5 3.5"/><path d="M4.5 9h7a4.5 4.5 0 0 1 0 9H9"/></svg></button>
         <button id="del" class="sq" disabled title="Delete (Del)" aria-label="Delete selected"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3.5 5.5h13M8 5.5V4h4v1.5M5.5 5.5l.8 11h7.4l.8-11M8.5 8.5v5.5M11.5 8.5v5.5"/></svg></button>
       </div>
-      <i class="div"></i>
+      <i class="div rotdiv"></i>
       <div class="group" title="Rotate the current page">
         <button id="rotL" class="sq" title="Rotate this page left ( [ )" aria-label="Rotate current page left"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 4v4h4"/><path d="M4.6 8A6.5 6.5 0 1 1 5 13.5"/></svg></button>
         <button id="rotR" class="sq" title="Rotate this page right ( ] )" aria-label="Rotate current page right"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M16 4v4h-4"/><path d="M15.4 8A6.5 6.5 0 1 0 15 13.5"/></svg></button>
@@ -170,6 +171,20 @@
   <div class="dlg-actions">
     <button id="sigCancel" class="btn" type="button">Cancel</button>
     <button id="sigUse" class="btn primary" type="button">Use signature</button>
+  </div>
+</dialog>
+
+<dialog id="xfaDialog">
+  <h2>Save this dynamic form</h2>
+  <p class="note">This is a dynamic (XFA) form. Its fields are saved into the form itself, but the text, ticks and signature you added on top can't be stored in this kind of form.</p>
+  <ul class="choices">
+    <li><b>Save form only</b>: the official fillable form with your answers. Open it in Adobe Acrobat Reader to validate and print.</li>
+    <li><b>Print to PDF</b>: a flat copy with everything, including what you added. Choose “Save as PDF” in the print window.</li>
+  </ul>
+  <div class="dlg-actions">
+    <button id="xfaCancel" class="btn" type="button">Cancel</button>
+    <button id="xfaPrint" class="btn" type="button">Print to PDF</button>
+    <button id="xfaSave" class="btn primary" type="button">Save form only</button>
   </div>
 </dialog>
 
